@@ -160,6 +160,7 @@
 #define CP_LOADSTATE_NUMOFUNITS_SHIFT 0x00000016
 #define CP_LOADSTATE_STATETYPE_SHIFT 0x00000000
 #define CP_LOADSTATE_EXTSRCADDR_SHIFT 0x00000002
+
 /* Used to define amble type in SET_AMBLE packet to execute during preemption */
 #define CP_KMD_AMBLE_TYPE 3
 

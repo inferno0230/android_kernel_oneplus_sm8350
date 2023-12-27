@@ -77,6 +77,10 @@
 
 #include "cpupri.h"
 #include "cpudeadline.h"
+#if defined(OPLUS_FEATURE_SCHED_ASSIST) && defined(CONFIG_OPLUS_CPUFREQ_IOWAIT_PROTECT)
+#include <linux/sched_assist/eas_opt/oplus_iowait.h>
+#endif
+
 
 #ifdef CONFIG_SCHED_DEBUG
 # define SCHED_WARN_ON(x)	WARN_ONCE(x, #x)
@@ -1170,6 +1174,7 @@ struct rq {
 #endif
 #if defined(OPLUS_FEATURE_SCHED_ASSIST) && defined(CONFIG_OPLUS_FEATURE_SCHED_ASSIST)
 	struct list_head ux_thread_list;
+	raw_spinlock_t ux_list_lock;
 #endif /* defined(OPLUS_FEATURE_SCHED_ASSIST) && defined(CONFIG_OPLUS_FEATURE_SCHED_ASSIST) */
 #ifdef CONFIG_LOCKING_PROTECT
 	int rq_locking_task;
@@ -2169,11 +2174,6 @@ extern void check_preempt_curr(struct rq *rq, struct task_struct *p, int flags);
 extern const_debug unsigned int sysctl_sched_nr_migrate;
 extern const_debug unsigned int sysctl_sched_migration_cost;
 
-#ifdef CONFIG_OPLUS_CPUFREQ_IOWAIT_PROTECT
-extern unsigned int sysctl_iowait_reset_ticks;
-extern unsigned int sysctl_iowait_apply_ticks;
-#endif
-
 #ifdef CONFIG_SCHED_HRTICK
 
 /*
@@ -2684,7 +2684,7 @@ static inline void cpufreq_update_util(struct rq *rq, unsigned int flags)
 	u64 clock;
 
 #ifdef CONFIG_SCHED_WALT
-#ifdef CONFIG_OPLUS_CPUFREQ_IOWAIT_PROTECT
+#if defined(OPLUS_FEATURE_SCHED_ASSIST) && defined(CONFIG_OPLUS_CPUFREQ_IOWAIT_PROTECT)
 	if ((sysctl_iowait_reset_ticks == 1) && (sysctl_iowait_apply_ticks==0) && (!(flags & SCHED_CPUFREQ_WALT)))
 #else
 	if (!(flags & SCHED_CPUFREQ_WALT))

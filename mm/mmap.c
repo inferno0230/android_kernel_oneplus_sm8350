@@ -769,29 +769,9 @@ int __vma_adjust(struct vm_area_struct *vma, unsigned long start,
 	long adjust_next = 0;
 	int remove_next = 0;
 
-	/*
-	 * Why using vm_raw_write*() functions here to avoid lockdep's warning ?
-	 *
-	 * Locked is complaining about a theoretical lock dependency, involving
-	 * 3 locks:
-	 *   mapping->i_mmap_rwsem --> vma->vm_sequence --> fs_reclaim
-	 *
-	 * Here are the major path leading to this dependency :
-	 *  1. __vma_adjust() mmap_sem  -> vm_sequence -> i_mmap_rwsem
-	 *  2. move_vmap() mmap_sem -> vm_sequence -> fs_reclaim
-	 *  3. __alloc_pages_nodemask() fs_reclaim -> i_mmap_rwsem
-	 *  4. unmap_mapping_range() i_mmap_rwsem -> vm_sequence
-	 *
-	 * So there is no way to solve this easily, especially because in
-	 * unmap_mapping_range() the i_mmap_rwsem is grab while the impacted
-	 * VMAs are not yet known.
-	 * However, the way the vm_seq is used is guarantying that we will
-	 * never block on it since we just check for its value and never wait
-	 * for it to move, see vma_has_changed() and handle_speculative_fault().
-	 */
-	vm_raw_write_begin(vma);
+	vm_write_begin(vma);
 	if (next)
-		vm_raw_write_begin(next);
+		vm_write_begin(next);
 
 	if (next && !insert) {
 		struct vm_area_struct *exporter = NULL, *importer = NULL;
@@ -875,15 +855,18 @@ int __vma_adjust(struct vm_area_struct *vma, unsigned long start,
 			error = anon_vma_clone(importer, exporter);
 			if (error) {
 				if (next && next != vma)
-					vm_raw_write_end(next);
-				vm_raw_write_end(vma);
+					vm_write_end(next);
+				vm_write_end(vma);
 				return error;
 			}
 		}
 	}
 again:
+#ifdef CONFIG_CONT_PTE_HUGEPAGE
+	vma_adjust_cont_pte_trans_huge(orig_vma, start, end, adjust_next);
+#else
 	vma_adjust_trans_huge(orig_vma, start, end, adjust_next);
-
+#endif
 	if (file) {
 		mapping = file->f_mapping;
 		root = &mapping->i_mmap;
@@ -1005,7 +988,7 @@ again:
 		if (next->anon_vma)
 			anon_vma_merge(vma, next);
 		mm->map_count--;
-		vm_raw_write_end(next);
+		vm_write_end(next);
 		put_vma(next);
 		/*
 		 * In mprotect's case 6 (see comments on vma_merge),
@@ -1021,7 +1004,7 @@ again:
 			 */
 			next = vma->vm_next;
 			if (next)
-				vm_raw_write_begin(next);
+				vm_write_begin(next);
 		} else {
 			/*
 			 * For the scope of the comment "next" and
@@ -1069,9 +1052,9 @@ again:
 		uprobe_mmap(insert);
 
 	if (next && next != vma)
-		vm_raw_write_end(next);
+		vm_write_end(next);
 	if (!keep_locked)
-		vm_raw_write_end(vma);
+		vm_write_end(vma);
 
 	validate_mm(mm);
 
@@ -1557,6 +1540,15 @@ unsigned long do_mmap(struct file *file, unsigned long addr,
 
 		if (!file_mmap_ok(file, inode, pgoff, len))
 			return -EOVERFLOW;
+#ifdef CONFIG_CONT_PTE_HUGEPAGE
+		/* jar is first mapped as R+W, then W is removed. but actually Android has
+		 * never written it. ignore WRITE and make jar eligible for hugepages.
+		 * Note: Ideally, we should fix it in Android.
+		 */
+		if (inode->may_cont_pte == JAR_HUGE &&
+		    CONFIG_CONT_PTE_FILE_HUGEPAGE_DISABLE != 1)
+			vm_flags &= ~VM_WRITE;
+#endif
 
 		flags_mask = LEGACY_MAP_MASK | file->f_op->mmap_supported_flags;
 
@@ -1766,8 +1758,12 @@ int vma_wants_writenotify(struct vm_area_struct *vma, pgprot_t vm_page_prot)
 	    pgprot_val(vm_pgprot_modify(vm_page_prot, vm_flags)))
 		return 0;
 
-	/* Do we need to track softdirty? */
-	if (IS_ENABLED(CONFIG_MEM_SOFT_DIRTY) && !(vm_flags & VM_SOFTDIRTY))
+	/*
+	 * Do we need to track softdirty? hugetlb does not support softdirty
+	 * tracking yet.
+	 */
+	if (IS_ENABLED(CONFIG_MEM_SOFT_DIRTY) && !(vm_flags & VM_SOFTDIRTY) &&
+	    !is_vm_hugetlb_page(vma))
 		return 1;
 
 	/* Specialty mapping? */
@@ -1950,7 +1946,6 @@ unmap_and_free_vma:
 
 	/* Undo any partial mapping done by a device driver. */
 	unmap_region(mm, vma, prev, vma->vm_start, vma->vm_end);
-	charged = 0;
 	if (vm_flags & VM_SHARED)
 		mapping_unmap_writable(file->f_mapping);
 allow_write_and_free_vma:
@@ -2210,7 +2205,11 @@ arch_get_unmapped_area(struct file *filp, unsigned long addr,
 	info.length = len;
 	info.low_limit = mm->mmap_base;
 	info.high_limit = mmap_end;
+#ifndef CONFIG_CONT_PTE_HUGEPAGE
 	info.align_mask = 0;
+#else
+	handle_chp_get_unmapped_area(&info, filp, pgoff);
+#endif
 	info.align_offset = 0;
 	return vm_unmapped_area(&info);
 }
@@ -2238,7 +2237,6 @@ arch_get_unmapped_area_topdown(struct file *filp, unsigned long addr,
 	if (flags & MAP_FIXED)
 		return addr;
 
-	/* requesting a specific address */
 	if (addr) {
 		addr = PAGE_ALIGN(addr);
 		vma = find_vma_prev(mm, addr, &prev);
@@ -2259,6 +2257,12 @@ arch_get_unmapped_area_topdown(struct file *filp, unsigned long addr,
 	info.high_limit = arch_get_mmap_base(addr, mm->mmap_base);
 	info.align_mask = 0;
 	info.align_offset = 0;
+#ifndef CONFIG_CONT_PTE_HUGEPAGE
+	info.align_mask = 0;
+#else
+	handle_chp_get_unmapped_area(&info, filp, pgoff);
+#endif
+
 	addr = vm_unmapped_area(&info);
 
 	/*
@@ -2727,11 +2731,28 @@ static void unmap_region(struct mm_struct *mm,
 {
 	struct vm_area_struct *next = prev ? prev->vm_next : mm->mmap;
 	struct mmu_gather tlb;
+	struct vm_area_struct *cur_vma;
 
 	lru_add_drain();
 	tlb_gather_mmu(&tlb, mm, start, end);
 	update_hiwater_rss(mm);
 	unmap_vmas(&tlb, vma, start, end);
+
+	/*
+	 * Ensure we have no stale TLB entries by the time this mapping is
+	 * removed from the rmap.
+	 * Note that we don't have to worry about nested flushes here because
+	 * we're holding the mm semaphore for removing the mapping - so any
+	 * concurrent flush in this region has to be coming through the rmap,
+	 * and we synchronize against that using the rmap lock.
+	 */
+	for (cur_vma = vma; cur_vma; cur_vma = cur_vma->vm_next) {
+		if ((cur_vma->vm_flags & (VM_PFNMAP|VM_MIXEDMAP)) != 0) {
+			tlb_flush_mmu(&tlb);
+			break;
+		}
+	}
+
 	free_pgtables(&tlb, vma, prev ? prev->vm_end : FIRST_USER_ADDRESS,
 				 next ? next->vm_start : USER_PGTABLES_CEILING);
 	tlb_finish_mmu(&tlb, start, end);
@@ -2788,6 +2809,14 @@ int __split_vma(struct mm_struct *mm, struct vm_area_struct *vma,
 {
 	struct vm_area_struct *new;
 	int err;
+
+#ifdef CONFIG_CONT_PTE_HUGEPAGE
+#if CONFIG_CHP_ABMORMAL_PTES_DEBUG
+	if (vma_is_chp_anonymous(vma) && !IS_ALIGNED(addr, HPAGE_CONT_PTE_SIZE)) {
+		{volatile bool __maybe_unused x = commit_chp_abnormal_ptes_record(DOUBLE_MAP_REASON_SPLIT_VMA);}
+	}
+#endif
+#endif
 
 	if (vma->vm_ops && vma->vm_ops->split) {
 		err = vma->vm_ops->split(vma, addr);
@@ -3015,7 +3044,6 @@ SYSCALL_DEFINE2(munmap, unsigned long, addr, size_t, len)
 	return __vm_munmap(addr, len, true);
 }
 
-
 /*
  * Emulation of deprecated remap_file_pages() syscall.
  */
@@ -3094,8 +3122,11 @@ SYSCALL_DEFINE5(remap_file_pages, unsigned long, start, unsigned long, size,
 			 * Split pmd and munlock page on the border
 			 * of the range.
 			 */
+#ifdef CONFIG_CONT_PTE_HUGEPAGE
+			vma_adjust_cont_pte_trans_huge(tmp, start, start + size, 0);
+#else
 			vma_adjust_trans_huge(tmp, start, start + size, 0);
-
+#endif
 			munlock_vma_pages_range(tmp,
 					max(tmp->vm_start, start),
 					min(tmp->vm_end, start + size));
@@ -3419,7 +3450,7 @@ struct vm_area_struct *copy_vma(struct vm_area_struct **vmap,
 		 * that we protect it right now, and let the caller unprotect
 		 * it once the move is done.
 		 */
-		vm_raw_write_begin(new_vma);
+		vm_write_begin(new_vma);
 		vma_link(mm, new_vma, prev, rb_link, rb_parent);
 		*need_rmap_locks = false;
 	}

@@ -128,8 +128,8 @@ static void hans_handler(struct sk_buff *skb)
 		len = NLMSG_PAYLOAD(nlh, 0);
 		data = (struct hans_message *)NLMSG_DATA(nlh);
 
-		if (len < sizeof(struct hans_message)) {
-			pr_err("%s: hans_message len check faied! len = %d  min_expected_len = %lu!\n", __func__, len, sizeof(struct hans_message));
+		if (len < (sizeof(struct hans_message) - sizeof(int))) {
+			pr_err("%s: hans_message len check faied! len = %d  min_expected_len = %lu!\n", __func__, len, sizeof(struct hans_message) - sizeof(int));
 			return;
 		}
 
@@ -154,8 +154,16 @@ static void hans_handler(struct sk_buff *skb)
 			hans_kern_support_cgrpv2();
 			break;
 		case PKG:
-			printk(KERN_ERR "%s: --> PKG, uid = %d, pkg_cmd = %d\n", __func__, data->target_uid, data->pkg_cmd);
-			hans_network_cmd_parse(data->target_uid, data->pkg_cmd);
+			if (len < sizeof(struct hans_message)) {
+				/* native daemon in ofreezer 1.0 has no 'int persistent' in the message structure */
+				printk(KERN_ERR "%s: --> PKG, ofreezer 1.0 native, uid = %d, pkg_cmd = %d\n",
+						__func__, data->target_uid, data->pkg_cmd);
+				hans_network_cmd_parse(data->target_uid, 0 /* persistent */, data->pkg_cmd);
+				break;
+			}
+			printk(KERN_ERR "%s: --> PKG, uid = %d, persistent = %d, pkg_cmd = %d\n",
+					__func__, data->target_uid, data->persistent, data->pkg_cmd);
+			hans_network_cmd_parse(data->target_uid, data->persistent, data->pkg_cmd);
 			break;
 		case FROZEN_TRANS:
 		case CPUCTL_TRANS:

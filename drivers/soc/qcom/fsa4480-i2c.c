@@ -297,7 +297,7 @@ static void fsa4480_reset_and_check_switch(struct fsa4480_priv *fsa_priv)
 
 #if IS_ENABLED(CONFIG_OPLUS_FEATURE_MM_FEEDBACK)
 	if (retry_cnt == 0) {
-		scnprintf(buf, sizeof(buf) - 1, "func@@%s$$typec_mode@@%lu$$status_regs@@0x%x,0x%x", \
+		scnprintf(buf, sizeof(buf) - 1, "func@@%s$$typec_mode@@%d$$status_regs@@0x%x,0x%x", \
 			__func__, fsa_priv->usbc_mode.counter, switch_status0, switch_status1);
 		upload_mm_fb_kevent_to_atlas_limit(OPLUS_AUDIO_EVENTID_HEADSET_DET, buf, MM_FB_KEY_RATELIMIT_5MIN);
 	}
@@ -454,6 +454,44 @@ static int fsa4480_usbc_analog_setup_switches(struct fsa4480_priv *fsa_priv)
 		return fsa4480_usbc_analog_setup_switches_ucsi(fsa_priv);
 }
 
+#ifdef OPLUS_ARCH_EXTENDS
+int fsa4480_check_cross_conn(struct device_node *node)
+{
+	int ret = 0;
+	struct i2c_client *client = of_find_i2c_device_by_node(node);
+	struct fsa4480_priv *fsa_priv;
+
+	if (!client) {
+		pr_err("%s: fsa4480 client is NULL\n", __func__);
+		return 0;
+	}
+
+	fsa_priv = (struct fsa4480_priv *)i2c_get_clientdata(client);
+	if (!fsa_priv) {
+		pr_err("%s: fsa_priv is NULL\n", __func__);
+		return 0;
+	}
+
+	dev_dbg(fsa_priv->dev, "%s: registered vendor for %d\n",
+		__func__, fsa_priv->vendor);
+
+	switch (fsa_priv->vendor) {
+	case FSA4480:
+	case HL5280:
+	    ret = 0;
+	    break;
+	case DIO4480:
+	    ret = 1;
+	    break;
+	default:
+		break;
+	}
+
+	return ret;
+}
+EXPORT_SYMBOL(fsa4480_check_cross_conn);
+#endif /* OPLUS_ARCH_EXTENDS */
+
 /*
  * fsa4480_reg_notifier - register notifier block with fsa driver
  *
@@ -582,7 +620,7 @@ int fsa4480_switch_event(struct device_node *node,
 			pr_err("%s: error mode, reg[0x%x]=0x%x, reg[0x%x]=0x%x\n", __func__,
 					FSA4480_SWITCH_SETTINGS, setting_reg_val, FSA4480_SWITCH_CONTROL, control_reg_val);
 #if IS_ENABLED(CONFIG_OPLUS_FEATURE_MM_FEEDBACK)
-			scnprintf(buf, sizeof(buf) - 1, "func@@%s$$typec_mode@@%lu$$regs@@0x%x,0x%x", \
+			scnprintf(buf, sizeof(buf) - 1, "func@@%s$$typec_mode@@%d$$regs@@0x%x,0x%x", \
 					__func__, fsa_priv->usbc_mode.counter, setting_reg_val, control_reg_val);
 			upload_mm_fb_kevent_to_atlas_limit(OPLUS_AUDIO_EVENTID_HEADSET_DET, buf, MM_FB_KEY_RATELIMIT_5MIN);
 #endif

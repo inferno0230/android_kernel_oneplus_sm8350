@@ -14,13 +14,15 @@
 struct ion_boost_pool {
 	char *name;
 	struct task_struct *tsk, *prefill_tsk;
+	int camera_low;
 	int low, high, origin;
+	pid_t camera_pid;
 	unsigned long usage;
 	unsigned int wait_flag, prefill_wait_flag;
 	bool force_stop, prefill;
 	struct mutex prefill_mutex;
 	wait_queue_head_t waitq, prefill_waitq;
-	struct proc_dir_entry *proc_info, *proc_low_info, *proc_stat;
+	struct proc_dir_entry *proc_info, *proc_low_info, *proc_stat, *proc_pid;
 	struct ion_msm_page_pool *pools[0];
 };
 

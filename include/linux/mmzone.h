@@ -49,6 +49,7 @@ struct page_label {
  * coalesce naturally under reasonable reclaim pressure and those which
  * will not.
  */
+
 #define PAGE_ALLOC_COSTLY_ORDER 3
 
 #define MAX_KSWAPD_THREADS 16

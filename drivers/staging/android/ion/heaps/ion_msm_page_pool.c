@@ -18,7 +18,9 @@ inline struct page
 {
 	if (fatal_signal_pending(current))
 		return NULL;
+
 	return alloc_pages(pool->gfp_mask, pool->order);
+
 }
 
 static void ion_msm_page_pool_free_pages(struct ion_msm_page_pool *pool,

@@ -1172,6 +1172,9 @@ __rt_mutex_slowlock(struct rt_mutex *lock, int state,
 {
 	int ret = 0;
 
+#ifdef CONFIG_LOCKING_PROTECT
+	update_locking_time(jiffies, false);
+#endif
 	for (;;) {
 		/* Try to acquire the lock: */
 		if (try_to_take_rt_mutex(lock, current, waiter))

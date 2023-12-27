@@ -27,6 +27,7 @@ obj-$(CONFIG_ARCH_U8500)	+= ux500/
 obj-$(CONFIG_PLAT_VERSATILE)	+= versatile/
 obj-y				+= xilinx/
 obj-$(CONFIG_ARCH_ZX)		+= zte/
+obj-y				+= oplus/storage/
 #ifdef VENDOR_EDIT
 obj-$(CONFIG_OPLUS_SYSTEM_KERNEL)	+= oplus/system/
 #obj-y				+= oplus/device_info/
@@ -99,3 +100,7 @@ obj-$(CONFIG_OPLUS_FEATURE_OCH) += oplus/cpufreq_health/
 #ifdef OPLUS_FEATURE_GAME_OPT
 obj-$(CONFIG_OPLUS_FEATURE_GAME_OPT) += oplus/game_opt/
 #endif /* OPLUS_FEATURE_GAME_OPT */
+
+#ifdef OPLUS_SUBSYS_SLEEP_MONITOR
+obj-$(CONFIG_OPLUS_SUBSYS_SLEEP_MONITOR)     += oplus/power/subsys_sleep_monitor/
+#endif /* OPLUS_SUBSYS_SLEEP_MONITOR */

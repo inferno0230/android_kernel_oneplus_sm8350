@@ -3,7 +3,7 @@
  * Copyright (C) 2020-2022 Oplus. All rights reserved.
  */
 
-#define pr_fmt(fmt) "[HYBRIDSWAP]" fmt
+#define pr_fmt(fmt) "[HYB_ZRAM]" fmt
 
 #include <linux/kernel.h>
 #include <linux/device.h>
@@ -726,7 +726,7 @@ ssize_t hybridswap_report_show(struct device *dev,
 	return hybridswap_error_record_show(buf);
 }
 
-static inline meminfo_show(struct hybridswap_stat *stat, char *buf, ssize_t len)
+static inline ssize_t meminfo_show(struct hybridswap_stat *stat, char *buf, ssize_t len)
 {
 	unsigned long eswap_total_pages = 0, eswap_compressed_pages = 0;
 	unsigned long eswap_used_pages = 0;
@@ -739,7 +739,7 @@ static inline meminfo_show(struct hybridswap_stat *stat, char *buf, ssize_t len)
 	(void)hybridswap_stored_info(&eswap_total_pages, &eswap_compressed_pages);
 	eswap_used_pages = atomic64_read(&stat->stored_pages);
 #ifdef CONFIG_HYBRIDSWAP_SWAPD
-	zram_total_pags = get_nr_zram_total();
+	zram_total_pags = hybridswapd_ops->zram_total_pages();
 #else
 	zram_total_pags = 0;
 #endif
@@ -759,6 +759,30 @@ static inline meminfo_show(struct hybridswap_stat *stat, char *buf, ssize_t len)
 	size += scnprintf(buf + size, len - size, "%-32s %12llu KB\n",
 			"ZSU_O:", zram_used_pages << (PAGE_SHIFT - 10));
 
+	return size;
+}
+
+static inline ssize_t chp_meminfo_show(char *buf, ssize_t len)
+{
+	ssize_t size = 0;
+	unsigned long total_pages = hybridswapd_ops->zram_total_pages() << 2;
+
+	size += scnprintf(buf + size, len - size, "%-32s %12llu KB\n", "EST:", 0);
+	size += scnprintf(buf + size, len - size, "%-32s %12llu KB\n", "ESU_C:", 0);
+	size += scnprintf(buf + size, len - size, "%-32s %12llu KB\n", "ESU_O:", 0);
+	size += scnprintf(buf + size, len - size, "%-32s %12llu KB\n",
+			  "ZST:", total_pages);
+	size += scnprintf(buf + size, len - size, "%-32s %12llu KB\n",
+			  "ZSU_C:",
+			  hybridswapd_ops->zram_compressed_pages() << 2);
+	/*
+	 * zram_total_pages may equal to limit zram size not swap total, so
+	 * zram used pages may greater than zram_total_pages
+	 */
+	size += scnprintf(buf + size, len - size, "%-32s %12llu KB\n",
+			  "ZSU_O:",
+			  min(hybridswapd_ops->zram_used_pages() << 2,
+			      total_pages));
 	return size;
 }
 
@@ -854,6 +878,14 @@ ssize_t hybridswap_meminfo_show(struct device *dev,
 {
 	struct hybridswap_stat *stat = NULL;
 
+#ifdef CONFIG_CONT_PTE_HUGEPAGE_64K_ZRAM
+	if (chp_supported) {
+		if (hybridswap_get_stat_obj())
+			return chp_meminfo_show(buf, PAGE_SIZE);
+		else
+			return 0;
+	}
+#endif
 	if (!hybridswap_core_enabled())
 		return 0;
 
@@ -2246,6 +2278,10 @@ void hybridswap_set_reclaim_in_enable(bool en)
 
 bool hybridswap_core_enabled(void)
 {
+#ifdef CONFIG_CONT_PTE_HUGEPAGE_64K_ZRAM
+	if (chp_supported)
+		return false;
+#endif
 	return !!atomic_read(&global_settings.enable);
 }
 
@@ -2570,8 +2606,8 @@ ssize_t hybridswap_core_enable_show(struct device *dev,
 	return len;
 }
 
-ssize_t hybridswap_loop_device_store(struct device *dev,
-		struct device_attribute *attr, const char *buf, size_t len)
+ssize_t backing_dev_store(struct device *dev,
+			  struct device_attribute *attr, const char *buf, size_t len)
 {
 	struct zram *zram;
 	int ret = 0;
@@ -2601,14 +2637,48 @@ out:
 	return len;
 }
 
-ssize_t hybridswap_loop_device_show(struct device *dev,
-		struct device_attribute *attr, char *buf)
+ssize_t backing_dev_show(struct device *dev,
+			 struct device_attribute *attr, char *buf)
 {
 	int len = 0;
 
 	len = sprintf(buf, "%s\n", loop_device);
-
 	return len;
+}
+
+ssize_t hybridswap_loop_device_store(struct device *dev,
+		struct device_attribute *attr, const char *buf, size_t len)
+{
+#ifdef CONFIG_CONT_PTE_HUGEPAGE_64K_ZRAM
+	struct zram *zram;
+
+	if (!chp_supported)
+		goto origin;
+
+	if (strncmp("chp", buf, 3) != 0) {
+		log_err("failed to set chp loop device\n");
+		return -EINVAL;
+	}
+
+	zram = dev_to_zram(dev);
+	down_write(&zram->init_lock);
+	if (!hybridswap_global_setting_init(zram))
+		log_err("setting init failed\n");
+	up_write(&zram->init_lock);
+	return len;
+origin:
+#endif
+	return backing_dev_store(dev, attr, buf, len);
+}
+
+ssize_t hybridswap_loop_device_show(struct device *dev,
+		struct device_attribute *attr, char *buf)
+{
+#ifdef CONFIG_CONT_PTE_HUGEPAGE_64K_ZRAM
+	if (chp_supported)
+		return sprintf(buf, "chp\n");
+#endif
+	return backing_dev_show(dev, attr, buf);
 }
 
 ssize_t hybridswap_dev_life_store(struct device *dev,
@@ -4572,8 +4642,8 @@ void hybridswap_track(struct zram *zram, u32 index,
 
 #ifdef CONFIG_HYBRIDSWAP_SWAPD
 	zram_slot_unlock(zram, index);
-	if (!zram_watermark_ok())
-		wake_all_swapd();
+	if (!hybridswapd_ops->zram_watermark_ok())
+		hybridswapd_ops->wakeup_kthreads();
 	zram_slot_lock(zram, index);
 #endif
 }
@@ -4653,8 +4723,8 @@ static void hybridswap_flush_done(struct hybridswap_entry *io_entry,
 		hybridswap_flush_cb(priv->scene,
 				io_entry->manager_private, req);
 #ifdef CONFIG_HYBRIDSWAP_SWAPD
-		if (!zram_watermark_ok())
-			wake_all_swapd();
+		if (!hybridswapd_ops->zram_watermark_ok())
+			hybridswapd_ops->wakeup_kthreads();
 #endif
 	} else {
 		hybridswap_extent_exception(priv->scene,
@@ -5233,7 +5303,7 @@ static int hybridswap_fault_out_get_extent(struct zram *zram,
 				hybridswap_free(sched->io_entry);
 #ifdef CONFIG_HYBRIDSWAP_SWAPD
 				if (wait_cycle >= 1000)
-					atomic_long_dec(&fault_out_pause);
+					atomic_long_dec(hybridswapd_ops->fault_out_pause);
 #endif
 				return -EAGAIN;
 			}
@@ -5257,15 +5327,15 @@ static int hybridswap_fault_out_get_extent(struct zram *zram,
 			wait_cycle++;
 #ifdef CONFIG_HYBRIDSWAP_SWAPD
 			if (wait_cycle == 1000) {
-				atomic_long_inc(&fault_out_pause);
-				atomic_long_inc(&fault_out_pause_cnt);
+				atomic_long_inc(hybridswapd_ops->fault_out_pause);
+				atomic_long_inc(hybridswapd_ops->fault_out_pause_cnt);
 			}
 #endif
 		}
 	}
 #ifdef CONFIG_HYBRIDSWAP_SWAPD
 	if (wait_cycle >= 1000)
-		atomic_long_dec(&fault_out_pause);
+		atomic_long_dec(hybridswapd_ops->fault_out_pause);
 #endif
 	if (sched->io_entry->ext_id < 0) {
 		hybridswap_stat_alloc_fail(SCENE_FAULT_OUT,

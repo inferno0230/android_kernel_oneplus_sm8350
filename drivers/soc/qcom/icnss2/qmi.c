@@ -725,9 +725,11 @@ int wlfw_cap_send_sync_msg(struct icnss_priv *priv)
 	    resp->rd_card_chain_cap == WLFW_RD_CARD_CHAIN_CAP_1x1_V01)
 		priv->is_chain1_supported = false;
 
-	icnss_pr_dbg("Capability, chip_id: 0x%x, chip_family: 0x%x, board_id: 0x%x, soc_id: 0x%x, fw_version: 0x%x, fw_build_timestamp: %s, fw_build_id: %s",
+	icnss_pr_dbg("Capability, chip_id: 0x%x, chip_family: 0x%x, board_id: 0x%x, soc_id: 0x%x",
 		     priv->chip_info.chip_id, priv->chip_info.chip_family,
-		     priv->board_id, priv->soc_id,
+		     priv->board_id, priv->soc_id);
+
+	icnss_pr_dbg("fw_version: 0x%x, fw_build_timestamp: %s, fw_build_id: %s",
 		     priv->fw_version_info.fw_version,
 		     priv->fw_version_info.fw_build_timestamp,
 		     priv->fw_build_id);
@@ -974,7 +976,7 @@ static void icnss_get_oplus_bdf_file_name(char* file_name, u32 filename_len) {
 	int project_id = get_project();
 	icnss_pr_dbg("project id: %d", project_id);
 
-	if (project_id == 22055) {
+	if (project_id == 22055 || project_id == 22101) {
 		if (is_secondory_BDF()) {
 //Modify for: Solve the problem that the wifi cannot be turned on due
 //to the failure of the second bdf to load after flashing the boot image
@@ -1341,7 +1343,8 @@ int icnss_wlfw_qdss_data_send_sync(struct icnss_priv *priv, char *file_name,
 		     resp->total_size == total_size) &&
 		    (resp->seg_id_valid == 1 && resp->seg_id == req->seg_id) &&
 		    (resp->data_valid == 1 &&
-		     resp->data_len <= QMI_WLFW_MAX_DATA_SIZE_V01)) {
+		     resp->data_len <= QMI_WLFW_MAX_DATA_SIZE_V01) &&
+		     resp->data_len <= remaining) {
 			memcpy(p_qdss_trace_data_temp,
 			       resp->data, resp->data_len);
 		} else {
@@ -3400,5 +3403,80 @@ int icnss_wlfw_get_info_send_sync(struct icnss_priv *plat_priv, int type,
 out:
 	kfree(req);
 	kfree(resp);
+	return ret;
+}
+
+int wlfw_subsys_restart_level_msg(struct icnss_priv *penv, uint8_t type)
+{
+	int ret;
+	struct wlfw_subsys_restart_level_req_msg_v01 *req;
+	struct wlfw_subsys_restart_level_resp_msg_v01 *resp;
+	struct qmi_txn txn;
+
+	if (!penv)
+		return -ENODEV;
+
+	if (test_bit(ICNSS_FW_DOWN, &penv->state))
+		return -EINVAL;
+
+	icnss_pr_dbg("Sending subsystem restart level, type: 0x%x\n", type);
+
+	req = kzalloc(sizeof(*req), GFP_KERNEL);
+	if (!req)
+		return -ENOMEM;
+
+	resp = kzalloc(sizeof(*resp), GFP_KERNEL);
+	if (!resp) {
+		kfree(req);
+		return -ENOMEM;
+	}
+
+	req->restart_level_type_valid = 1;
+	req->restart_level_type = type;
+
+	penv->stats.restart_level_req++;
+
+	ret = qmi_txn_init(&penv->qmi, &txn,
+			   wlfw_subsys_restart_level_resp_msg_v01_ei, resp);
+	if (ret < 0) {
+		icnss_pr_err("Fail to init txn for subsystem restart level, resp %d\n",
+			     ret);
+		goto out;
+	}
+
+	ret = qmi_send_request(&penv->qmi, NULL, &txn,
+			       QMI_WLFW_SUBSYS_RESTART_LEVEL_REQ_V01,
+			       WLFW_SUBSYS_RESTART_LEVEL_REQ_MSG_V01_MAX_MSG_LEN,
+			       wlfw_subsys_restart_level_req_msg_v01_ei, req);
+	if (ret < 0) {
+		qmi_txn_cancel(&txn);
+		icnss_pr_err("Fail to send subsystem restart level %d\n",
+			     ret);
+		goto out;
+	}
+
+	ret = qmi_txn_wait(&txn, penv->ctrl_params.qmi_timeout);
+	if (ret < 0) {
+		icnss_pr_err("Subsystem restart level timed out with ret %d\n",
+			     ret);
+		goto out;
+
+	} else if (resp->resp.result != QMI_RESULT_SUCCESS_V01) {
+		icnss_pr_err("Subsystem restart level request rejected,result:%d error:%d\n",
+			     resp->resp.result, resp->resp.error);
+		ret = -resp->resp.result;
+		goto out;
+	}
+
+	penv->stats.restart_level_resp++;
+
+	kfree(resp);
+	kfree(req);
+	return 0;
+
+out:
+	kfree(req);
+	kfree(resp);
+	penv->stats.restart_level_err++;
 	return ret;
 }

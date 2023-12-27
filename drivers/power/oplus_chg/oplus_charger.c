@@ -1288,7 +1288,8 @@ static ssize_t chg_cycle_write(struct file *file,
 		chg_err("chg_cycle_write error.\n");
 		return -EFAULT;
 	}
-	if (strncmp(proc_chg_cycle_data, "en808", 5) == 0) {
+	if ((strncmp(proc_chg_cycle_data, "en808", 5) == 0) ||
+		(strncmp(proc_chg_cycle_data, "user_enable", 11) == 0)) {
 		if(g_charger_chip->unwakelock_chg == 1) {
 			charger_xlog_printk(CHG_LOG_CRTI, "unwakelock testing , this test not allowed.\n");
 			return -EPERM;
@@ -1303,7 +1304,12 @@ static ssize_t chg_cycle_write(struct file *file,
 			oplus_chg_set_charging_current(g_charger_chip);
 		}
 		oplus_chg_set_input_current_limit(g_charger_chip);
-	} else if (strncmp(proc_chg_cycle_data, "dis808", 6) == 0) {
+		if (g_charger_chip->mmi_fastchg == 0) {
+			oplus_chg_clear_chargerid_info();
+		}
+		g_charger_chip->mmi_fastchg = 1;
+	} else if ((strncmp(proc_chg_cycle_data, "dis808", 6) == 0) ||
+		(strncmp(proc_chg_cycle_data, "user_disable", 12) == 0)) {
 		if(g_charger_chip->unwakelock_chg == 1) {
 			charger_xlog_printk(CHG_LOG_CRTI, "unwakelock testing , this test not allowed.\n");
 			return -EPERM;
@@ -1313,6 +1319,10 @@ static ssize_t chg_cycle_write(struct file *file,
 		g_charger_chip->chg_ops->charger_suspend();
 		g_charger_chip->mmi_chg = 0;
 		g_charger_chip->stop_chg = 0;
+		if (oplus_warp_get_fastchg_started() == true) {
+			oplus_warp_turn_off_fastchg();
+			g_charger_chip->mmi_fastchg = 0;
+		}
 	} else if (strncmp(proc_chg_cycle_data, "wakelock", 8) == 0) {
 		charger_xlog_printk(CHG_LOG_CRTI, "set wakelock.\n");
 		g_charger_chip->unwakelock_chg = 0;
@@ -8993,6 +9003,7 @@ int oplus_chg_show_warp_logo_ornot(void)
 			|| oplus_warp_get_fastchg_dummy_started() == true
 			|| oplus_warp_get_adapter_update_status() == ADAPTER_FW_NEED_UPDATE) {
 		if (g_charger_chip->prop_status != POWER_SUPPLY_STATUS_FULL
+				&& g_charger_chip->mmi_chg
 				&&(g_charger_chip->stop_voter == CHG_STOP_VOTER__FULL
 				|| g_charger_chip->stop_voter == CHG_STOP_VOTER_NONE)) {
 			return 1;

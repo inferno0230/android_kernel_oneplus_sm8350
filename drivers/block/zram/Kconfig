@@ -40,7 +40,7 @@ config ZRAM_MEMORY_TRACKING
 
 config HYBRIDSWAP
 	bool "Enable Hybridswap"
-	depends on MEMCG && ZRAM && QGKI
+	depends on MEMCG && ZRAM
 	default n
 	help
 	  Hybridswap is a intelligent memory management solution.

@@ -96,8 +96,8 @@ static void end_report(unsigned long *flags)
 	//BSP.Kernel.Stability, kasan load enforce BUG
 	panic("panic_on_warn set ...\n");
 #else	
-	if (panic_on_warn)
-		panic("panic_on_warn set ...\n");
+	if (!test_bit(KASAN_BIT_MULTI_SHOT, &kasan_flags))
+		check_panic_on_warn("KASAN");
 #endif
 	kasan_enable_current();
 }

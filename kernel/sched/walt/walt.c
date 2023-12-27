@@ -16,6 +16,10 @@
 #include <linux/cpufreq_bouncing/cpufreq_bouncing.h>
 #endif
 
+#ifdef CONFIG_OPLUS_FEATURE_OCH
+#include <linux/cpufreq_health.h>
+#endif
+
 #if defined(OPLUS_FEATURE_SCHED_ASSIST) && defined(CONFIG_OPLUS_FEATURE_SCHED_ASSIST)
 #include <linux/sched_assist/sched_assist_slide.h>
 #include <linux/sched_assist/sched_assist_common.h>
@@ -594,8 +598,11 @@ should_apply_suh_freq_boost(struct walt_sched_cluster *cluster)
 
 	return is_cluster_hosting_top_app(cluster);
 }
-
+#ifdef CONFIG_OPLUS_FEATURE_OCH
+static inline u64 freq_policy_load(struct rq *rq, int *edtask_flag)
+#else
 static inline u64 freq_policy_load(struct rq *rq)
+#endif
 {
 	unsigned int reporting_policy = sysctl_sched_freq_reporting_policy;
 	struct walt_sched_cluster *cluster = rq->wrq.cluster;
@@ -605,6 +612,9 @@ static inline u64 freq_policy_load(struct rq *rq)
 
 	if (rq->wrq.ed_task != NULL) {
 		load = sched_ravg_window;
+#ifdef CONFIG_OPLUS_FEATURE_OCH
+		*edtask_flag = 1;
+#endif
 		goto done;
 	}
 
@@ -655,9 +665,19 @@ __cpu_util_freq_walt(int cpu, struct walt_cpu_load *walt_load)
 	struct rq *rq = cpu_rq(cpu);
 	unsigned long capacity = capacity_orig_of(cpu);
 	int boost;
+#ifdef CONFIG_OPLUS_FEATURE_OCH
+	int edtask_flag = 0;
+#endif
 
 	boost = per_cpu(sched_load_boost, cpu);
+
+#ifdef CONFIG_OPLUS_FEATURE_OCH
+	util_unboosted = util = freq_policy_load(rq, &edtask_flag);
+	cpufreq_health_get_edtask_state(cpu, edtask_flag);
+#else
 	util_unboosted = util = freq_policy_load(rq);
+#endif
+
 	util = div64_u64(util * (100 + boost),
 			walt_cpu_util_freq_divisor);
 

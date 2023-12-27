@@ -68,6 +68,8 @@
 #include <linux/sched_assist/sched_assist_common.h>
 #endif /* OPLUS_FEATURE_SCHED_ASSIST */
 
+#undef CREATE_TRACE_POINTS
+#include <trace/hooks/signal.h>
 /*
  * SLAB caches for signal bits.
  */
@@ -1306,7 +1308,7 @@ int do_send_sig_info(int sig, struct kernel_siginfo *info, struct task_struct *p
 {
 	unsigned long flags;
 	int ret = -ESRCH;
-
+	trace_android_vh_do_send_sig_info(sig, current, p);
 #if defined(OPLUS_FEATURE_HANS_FREEZE) && defined(CONFIG_OPLUS_FEATURE_HANS)
 	hans_check_signal(p, sig);
 #endif /*OPLUS_FEATURE_HANS_FREEZE*/
@@ -1453,6 +1455,9 @@ int group_send_sig_info(int sig, struct kernel_siginfo *info,
 
 			if (pages > REAPER_SZ || !strcmp(current->comm, ULMK_MAGIC) ||
 						!strcmp(current->comm, ATHENA_KILLER_MAGIC))
+		if (capable(CAP_KILL) && sig == SIGKILL)
+			if (!strcmp(current->comm, ULMK_MAGIC) ||
+				!strcmp(current->comm, PRE_KILL))
 				add_to_oom_reaper(p);
 		}
 	}

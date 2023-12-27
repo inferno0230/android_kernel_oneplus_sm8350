@@ -820,7 +820,6 @@ struct wake_q_node {
 };
 
 #define OPLUS_NR_CPUS (8)
-
 #if IS_ENABLED(CONFIG_OPLUS_FEATURE_CPU_JANKINFO)
 /* hot-thread */
 struct task_record {
@@ -828,16 +827,30 @@ struct task_record {
 #define RECOED_WINIDX_MASK		(RECOED_WINSIZE - 1)
 	u8 winidx;
 	u8 count;
+	u8 top_app_cnt;
+	u8 non_topapp_cnt;
 };
 #endif
 
 #if IS_ENABLED(CONFIG_OPLUS_LOCKING_STRATEGY)
 struct locking_info {
 	u64 waittime_stamp;
-	u64 osq_holdtime_stamp;
+	/*
+	 * mutex or rwsem optimistic spin start time. Because a task
+	 * can't spin both on mutex and rwsem at one time, use one common
+	 * threshold time is OK.
+	 */
+	u64 opt_spin_start_time;
 	struct task_struct *holder;
-	u32 lock_type;
 	bool ux_contrib;
+	/*
+	 * Whether task is ux when it's going to be added to mutex or
+	 * rwsem waiter list. It helps us check whether there is ux
+	 * task on mutex or rwsem waiter list. Also, a task can't be
+	 * added to both mutex and rwsem at one time, so use one common
+	 * field is OK.
+	 */
+	bool is_block_ux;
 };
 #endif
 
@@ -1523,6 +1536,8 @@ struct task_struct {
 	int ux_depth;
 	u64 enqueue_time;
 	u64 inherit_ux_start;
+	u64 sum_exec_baseline;
+	u64 total_exec;
 #ifdef CONFIG_OPLUS_UX_IM_FLAG
 	int ux_im_flag;
 #ifdef CONFIG_MMAP_LOCK_OPT
@@ -1548,6 +1563,9 @@ struct task_struct {
 
 #if IS_ENABLED(CONFIG_OPLUS_FEATURE_CPU_JANKINFO)
 	struct task_record record[OPLUS_NR_CPUS];	/* 2*u64 */
+  	u8 total_cnt;
+  	u8 top_app_cnt;
+  	u8 non_topapp_cnt;
 #endif
 
 #ifdef OPLUS_FEATURE_HEALTHINFO
@@ -1803,6 +1821,7 @@ extern struct pid *cad_pid;
 #define PF_MEMALLOC		0x00000800	/* Allocating memory */
 #define PF_NPROC_EXCEEDED	0x00001000	/* set_user() noticed that RLIMIT_NPROC was exceeded */
 #define PF_USED_MATH		0x00002000	/* If unset the fpu must be initialized before use */
+#define PF_IPAALLOC		0x00004000	/*i am ipa thread*/
 #define PF_NOFREEZE		0x00008000	/* This thread should not be frozen */
 #define PF_FROZEN		0x00010000	/* Frozen for system suspend */
 #define PF_KSWAPD		0x00020000	/* I am kswapd */
@@ -2044,6 +2063,10 @@ extern void get_target_thread_pid(struct task_struct *p);
 #if defined(OPLUS_FEATURE_TASK_CPUSTATS) && defined(CONFIG_UTILS_MONITOR)
 extern void get_target_process(struct task_struct *task);
 #endif
+#ifdef CONFIG_CONT_PTE_HUGEPAGE
+extern void update_task_hugepage_critical_flag(struct task_struct *tsk);
+#endif
+
 static inline void set_task_comm(struct task_struct *tsk, const char *from)
 {
 	__set_task_comm(tsk, from, false);
@@ -2056,6 +2079,10 @@ static inline void set_task_comm(struct task_struct *tsk, const char *from)
 #endif
 #if defined(OPLUS_FEATURE_TASK_CPUSTATS) && defined(CONFIG_UTILS_MONITOR)
 	 get_target_process(tsk);
+
+#ifdef CONFIG_CONT_PTE_HUGEPAGE
+	update_task_hugepage_critical_flag(tsk);
+#endif
 #endif
 }
 

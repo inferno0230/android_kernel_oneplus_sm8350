@@ -81,7 +81,11 @@ static inline bool task_fits_max(struct task_struct *p, int cpu);
 #endif
 
 #if IS_ENABLED(CONFIG_OPLUS_FEATURE_CPU_JANKINFO)
-#include <linux/cpu_jankinfo/jank_tasktrack.h>
+#include <linux/sched_info/osi_tasktrack.h>
+#endif
+
+#ifdef CONFIG_OPLUS_FEATURE_VT_CAP
+#include <linux/sched_assist/eas_opt/oplus_cap.h>
 #endif
 
 /*
@@ -645,6 +649,9 @@ static void __enqueue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se)
 	struct sched_entity *entry;
 	bool leftmost = true;
 
+#ifdef CONFIG_LOCKING_PROTECT
+	enqueue_locking_entity(cfs_rq, se);
+#endif
 	/*
 	 * Find the right place in the rbtree:
 	 */
@@ -670,6 +677,9 @@ static void __enqueue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se)
 
 static void __dequeue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se)
 {
+#ifdef CONFIG_LOCKING_PROTECT
+	dequeue_locking_entity(cfs_rq, se);
+#endif
 	rb_erase_cached(&se->run_node, &cfs_rq->tasks_timeline);
 }
 
@@ -4260,11 +4270,7 @@ place_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int initial)
 
 		vruntime -= thresh;
 #ifdef CONFIG_SCHED_WALT
-#if defined(OPLUS_FEATURE_SCHED_ASSIST) && defined(CONFIG_OPLUS_FEATURE_SCHED_ASSIST)
-		if (entity_is_task(se) && !test_task_ux(task_of(se))) {
-#else
 		if (entity_is_task(se)) {
-#endif /* defined(OPLUS_FEATURE_SCHED_ASSIST) && defined(CONFIG_OPLUS_FEATURE_SCHED_ASSIST) */
 			if (per_task_boost(task_of(se)) == TASK_BOOST_STRICT_MAX) {
 				vruntime -= thresh;
 				vruntime -= sysctl_sched_latency;
@@ -4286,9 +4292,9 @@ place_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int initial)
 
 	/* ensure we never gain time by being placed backwards. */
 	se->vruntime = max_vruntime(se->vruntime, vruntime);
-#if defined(OPLUS_FEATURE_SCHED_ASSIST) && defined(CONFIG_OPLUS_FEATURE_SCHED_ASSIST)
-	place_entity_adjust_ux_task(cfs_rq, se, initial);
-#endif /* defined(OPLUS_FEATURE_SCHED_ASSIST) && defined(CONFIG_OPLUS_FEATURE_SCHED_ASSIST) */
+#ifdef CONFIG_OPLUS_FEATURE_VT_CAP
+	android_rvh_place_entity_handler(NULL, cfs_rq, se, initial, &vruntime);
+#endif
 }
 
 static void check_enqueue_throttle(struct cfs_rq *cfs_rq);
@@ -4382,11 +4388,7 @@ enqueue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int flags)
 	enqueue_runnable_load_avg(cfs_rq, se);
 	account_entity_enqueue(cfs_rq, se);
 
-#if defined(OPLUS_FEATURE_SCHED_ASSIST) && defined(CONFIG_OPLUS_FEATURE_SCHED_SPREAD)
-	if (flags & ENQUEUE_WAKEUP || should_force_adjust_vruntime(se))
-#else
 	if (flags & ENQUEUE_WAKEUP)
-#endif
 		place_entity(cfs_rq, se, 0);
 
 	check_schedstat_required();
@@ -4522,13 +4524,7 @@ check_preempt_tick(struct cfs_rq *cfs_rq, struct sched_entity *curr)
 
 	delta_exec = curr->sum_exec_runtime - curr->prev_sum_exec_runtime;
 #ifdef CONFIG_LOCKING_PROTECT
-	if (entity_is_task(curr)) {
-		struct task_struct *curr_tsk = container_of(curr, struct task_struct, se);
-		if (curr_tsk && task_inlock(curr_tsk)) {
-			if (locking_protect_outtime(curr_tsk))
-				clear_locking_info(curr_tsk);
-		}
-	}
+	check_locking_protect_tick(curr);
 #endif
 	if (delta_exec > ideal_runtime) {
 		resched_curr(rq_of(cfs_rq));
@@ -4621,8 +4617,6 @@ pick_next_entity(struct cfs_rq *cfs_rq, struct sched_entity *curr)
 
 	se = left; /* ideally we run the leftmost entity */
 #if defined(OPLUS_FEATURE_SCHED_ASSIST) && defined(CONFIG_OPLUS_FEATURE_SCHED_ASSIST)
-	if (should_ux_task_skip_further_check(se))
-		return se;
 
 #ifdef CONFIG_OPLUS_FEATURE_AUDIO_OPT
 	if (sched_assist_pick_next_entity(cfs_rq, &se)) {
@@ -5731,11 +5725,10 @@ enqueue_task_fair(struct rq *rq, struct task_struct *p, int flags)
 		flags = ENQUEUE_WAKEUP;
 	}
 #if defined(OPLUS_FEATURE_SCHED_ASSIST) && defined(CONFIG_OPLUS_FEATURE_SCHED_ASSIST)
-	enqueue_ux_thread(rq, p);
-#endif /* defined(OPLUS_FEATURE_SCHED_ASSIST) && defined(CONFIG_OPLUS_FEATURE_SCHED_ASSIST) */
-#ifdef CONFIG_LOCKING_PROTECT
-	enqueue_locking_thread(rq, p);
+#if IS_ENABLED(CONFIG_OPLUS_FEATURE_SCHED_UX_PRIORITY)
+	enqueue_ux_thread_to_list(rq, p);
 #endif
+#endif /* defined(OPLUS_FEATURE_SCHED_ASSIST) && defined(CONFIG_OPLUS_FEATURE_SCHED_ASSIST) */
 	for_each_sched_entity(se) {
 		cfs_rq = cfs_rq_of(se);
 
@@ -5846,11 +5839,10 @@ static void dequeue_task_fair(struct rq *rq, struct task_struct *p, int flags)
 		flags |= DEQUEUE_SLEEP;
 	}
 #if defined(OPLUS_FEATURE_SCHED_ASSIST) && defined(CONFIG_OPLUS_FEATURE_SCHED_ASSIST)
-        dequeue_ux_thread(rq, p);
-#endif /* defined(OPLUS_FEATURE_SCHED_ASSIST) && defined(CONFIG_OPLUS_FEATURE_SCHED_ASSIST) */
-#ifdef CONFIG_LOCKING_PROTECT
-	dequeue_locking_thread(rq, p);
+#if IS_ENABLED(CONFIG_OPLUS_FEATURE_SCHED_UX_PRIORITY)
+	dequeue_ux_thread_from_list(rq, p);
 #endif
+#endif /* defined(OPLUS_FEATURE_SCHED_ASSIST) && defined(CONFIG_OPLUS_FEATURE_SCHED_ASSIST) */
 	for_each_sched_entity(se) {
 		cfs_rq = cfs_rq_of(se);
 
@@ -6839,7 +6831,16 @@ static void walt_get_indicies(struct task_struct *p, int *order_index,
 
 	for (i = *order_index ; i < num_sched_clusters - 1; i++) {
 		if (task_demand_fits(p, cpumask_first(&cpu_array[i][0])))
+#ifdef CONFIG_OPLUS_FEATURE_VT_CAP
+		{
+			if (adjust_group_task(p, cpumask_first(&cpu_array[i][0])))
+				continue;
+			else
+				break;
+		}
+#else
 			break;
+#endif
 	}
 
 	*order_index = i;
@@ -7288,6 +7289,14 @@ compute_energy(struct task_struct *p, int dst_cpu, struct perf_domain *pd)
 	unsigned long energy = 0;
 	int cpu;
 	unsigned long cpu_util;
+#ifdef CONFIG_OPLUS_FEATURE_VT_CAP
+	struct rq* rq = NULL;
+	unsigned int avg_nr_running = 1;
+	unsigned int count_cpu = 0;
+	int cluster_id = topology_physical_package_id(cpumask_first(pd_mask));
+	unsigned long util_thresh = 0;
+	unsigned long capacity = arch_scale_cpu_capacity(cpumask_first(pd_mask));
+#endif
 
 	/*
 	 * The capacity state of CPUs of the current rd can be driven by CPUs
@@ -7326,8 +7335,27 @@ compute_energy(struct task_struct *p, int dst_cpu, struct perf_domain *pd)
 					      FREQUENCY_UTIL, tsk);
 #endif
 		max_util = max(max_util, cpu_util);
+#ifdef CONFIG_OPLUS_FEATURE_VT_CAP
+		rq = cpu_rq(cpu);
+		avg_nr_running += rq->nr_running;
+		count_cpu++;
+#endif
 	}
 
+#ifdef CONFIG_OPLUS_FEATURE_VT_CAP
+	if (eas_opt_enable && (util_thresh_percent[cluster_id] != 100) && count_cpu) {
+		unsigned long max_util_bak = max_util;
+		util_thresh = capacity * util_thresh_cvt[cluster_id] >> SCHED_CAPACITY_SHIFT;
+		avg_nr_running = mult_frac(avg_nr_running, 1, count_cpu);
+		max_util = (util_thresh < max_util) ?
+			(util_thresh + ((avg_nr_running * (max_util - util_thresh)* nr_oplus_cap_multiple[cluster_id]) >> SCHED_CAPACITY_SHIFT)) : max_util;
+		if (unlikely(eas_opt_debug_enable))
+			trace_printk("[eas_opt]: cluster_id: %d, capacity: %d, util_thresh: %d, avg_nr_running: %d, "
+					"origin_max_util: %d, max_util: %d, util_thresh_percent: %d\n",
+					cluster_id, capacity, util_thresh, avg_nr_running,
+					max_util_bak, max_util, util_thresh_percent[cluster_id]);
+	}
+#endif
 	trace_android_vh_em_pd_energy(pd->em_pd, max_util, sum_util, &energy);
 	if (!energy)
 		energy = em_pd_energy(pd->em_pd, max_util, sum_util);
@@ -7995,6 +8023,11 @@ static void check_preempt_wakeup(struct rq *rq, struct task_struct *p, int wake_
 	int scale = cfs_rq->nr_running >= sched_nr_latency;
 	int next_buddy_marked = 0;
 	int ignore = -1;
+#if defined(OPLUS_FEATURE_SCHED_ASSIST) && defined(CONFIG_OPLUS_FEATURE_SCHED_ASSIST)
+#if IS_ENABLED(CONFIG_OPLUS_FEATURE_SCHED_UX_PRIORITY)
+	bool preempt = false, nopreempt = false;
+#endif
+#endif
 
 	if (unlikely(se == pse))
 		return;
@@ -8005,7 +8038,7 @@ static void check_preempt_wakeup(struct rq *rq, struct task_struct *p, int wake_
 		return;
 	}
 #ifdef CONFIG_LOCKING_PROTECT
-	if (task_inlock(curr) && !task_skip_protect(p))
+	if (check_locking_protect_wakeup(curr, p))
 		return;
 #endif
 
@@ -8059,10 +8092,13 @@ static void check_preempt_wakeup(struct rq *rq, struct task_struct *p, int wake_
 	}
 #endif
 #if defined(OPLUS_FEATURE_SCHED_ASSIST) && defined(CONFIG_OPLUS_FEATURE_SCHED_ASSIST)
-	if (should_ux_preempt_wakeup(p, curr))
+#if IS_ENABLED(CONFIG_OPLUS_FEATURE_SCHED_UX_PRIORITY)
+	oplus_check_preempt_wakeup_in_list(rq, p, curr, &preempt, &nopreempt);
+	if (preempt)
 		goto preempt;
-	else if (test_task_ux(curr))
+	if (nopreempt)
 		return;
+#endif
 #endif /* defined(OPLUS_FEATURE_SCHED_ASSIST) && defined(CONFIG_OPLUS_FEATURE_SCHED_ASSIST) */
 	if (wakeup_preempt_entity(se, pse) == 1) {
 		/*
@@ -8098,8 +8134,15 @@ static struct task_struct *
 pick_next_task_fair(struct rq *rq, struct task_struct *prev, struct rq_flags *rf)
 {
 	struct cfs_rq *cfs_rq = &rq->cfs;
+#if defined(OPLUS_FEATURE_SCHED_ASSIST) && defined(CONFIG_OPLUS_FEATURE_SCHED_ASSIST) \
+	&& IS_ENABLED(CONFIG_OPLUS_FEATURE_SCHED_UX_PRIORITY)
+	struct sched_entity *se = NULL;
+	struct task_struct *p = NULL;
+	bool repick = false;
+#else
 	struct sched_entity *se;
 	struct task_struct *p;
+#endif
 	int new_tasks;
 
 again:
@@ -8154,11 +8197,9 @@ again:
 	} while (cfs_rq);
 
 	p = task_of(se);
-#if defined(OPLUS_FEATURE_SCHED_ASSIST) && defined(CONFIG_OPLUS_FEATURE_SCHED_ASSIST)
-        pick_ux_thread(rq, &p, &se);
-#endif /* defined(OPLUS_FEATURE_SCHED_ASSIST) && defined(CONFIG_OPLUS_FEATURE_SCHED_ASSIST) */
-#ifdef CONFIG_LOCKING_PROTECT
-	pick_locking_thread(rq, &p, &se);
+#if defined(OPLUS_FEATURE_SCHED_ASSIST) && defined(CONFIG_OPLUS_FEATURE_SCHED_ASSIST) \
+	&& IS_ENABLED(CONFIG_OPLUS_FEATURE_SCHED_UX_PRIORITY)
+	android_rvh_replace_next_task_fair_handler(rq, &p, &se, &repick, false);
 #endif
 	/*
 	 * Since we haven't yet done put_prev_entity and if the selected task
@@ -8192,27 +8233,23 @@ simple:
 	if (prev)
 		put_prev_task(rq, prev);
 
+#if defined(OPLUS_FEATURE_SCHED_ASSIST) && defined(CONFIG_OPLUS_FEATURE_SCHED_ASSIST) \
+	&& IS_ENABLED(CONFIG_OPLUS_FEATURE_SCHED_UX_PRIORITY)
+	android_rvh_replace_next_task_fair_handler(rq, &p, &se, &repick, true);
+	if (repick) {
+		for_each_sched_entity(se)
+			set_next_entity(cfs_rq_of(se), se);
+		goto done;
+	}
+#endif
+
 	do {
 		se = pick_next_entity(cfs_rq, NULL);
-#if !(defined(OPLUS_FEATURE_SCHED_ASSIST) && defined(CONFIG_OPLUS_FEATURE_SCHED_ASSIST))
 		set_next_entity(cfs_rq, se);
-#endif
 		cfs_rq = group_cfs_rq(se);
 	} while (cfs_rq);
 
 	p = task_of(se);
-
-#if defined(OPLUS_FEATURE_SCHED_ASSIST) && defined(CONFIG_OPLUS_FEATURE_SCHED_ASSIST)
-	if (sysctl_sched_assist_enabled) {
-		pick_ux_thread(rq, &p, &se);
-	}
-#ifdef CONFIG_LOCKING_PROTECT
-	pick_locking_thread(rq, &p, &se);
-#endif
-	for_each_sched_entity(se) {
-		set_next_entity(cfs_rq_of(se), se);
-	}
-#endif
 
 done: __maybe_unused;
 #ifdef CONFIG_SMP
@@ -8653,6 +8690,10 @@ int can_migrate_task(struct task_struct *p, struct lb_env *env)
 			return 0;
 	}
 #endif
+	/* Disregard pcpu kthreads; they are where they need to be. */
+	if (kthread_is_per_cpu(p))
+		return 0;
+
 	/* Disregard pcpu kthreads; they are where they need to be. */
 	if (kthread_is_per_cpu(p))
 		return 0;
@@ -9325,14 +9366,29 @@ static void update_cpu_capacity(struct sched_domain *sd, int cpu)
 {
 	unsigned long capacity = arch_scale_cpu_capacity(cpu);
 	struct sched_group *sdg = sd->groups;
+#if IS_ENABLED(CONFIG_OPLUS_FEATURE_VT_CAP)
+	int cluster_id = topology_physical_package_id(cpu);
+#endif
 
 	capacity *= arch_scale_max_freq_capacity(sd, cpu);
 	capacity >>= SCHED_CAPACITY_SHIFT;
 
 	capacity = min(capacity, thermal_cap(cpu));
+#if IS_ENABLED(CONFIG_OPLUS_FEATURE_VT_CAP)
+	if (eas_opt_enable && cluster_id >= 0 && cluster_id < OPLUS_CLUSTERS)
+		cpu_rq(cpu)->cpu_capacity_orig = mult_frac(capacity, oplus_cap_multiple[cluster_id], 100);
+	else
+		cpu_rq(cpu)->cpu_capacity_orig = capacity;
+	real_cpu_cap[cpu] = capacity;
+#else
 	cpu_rq(cpu)->cpu_capacity_orig = capacity;
+#endif
 
+#if IS_ENABLED(CONFIG_OPLUS_FEATURE_VT_CAP)
+	capacity = scale_rt_capacity(cpu, cpu_rq(cpu)->cpu_capacity_orig);
+#else
 	capacity = scale_rt_capacity(cpu, capacity);
+#endif
 
 	if (!capacity)
 		capacity = 1;
@@ -9341,6 +9397,10 @@ static void update_cpu_capacity(struct sched_domain *sd, int cpu)
 	sdg->sgc->capacity = capacity;
 	sdg->sgc->min_capacity = capacity;
 	sdg->sgc->max_capacity = capacity;
+#if IS_ENABLED(CONFIG_OPLUS_FEATURE_VT_CAP)
+	if (unlikely(eas_opt_debug_enable))
+			oplus_cap_systrace_c(cpu, cpu_rq(cpu)->cpu_capacity_orig, real_cpu_cap[cpu]);
+#endif
 }
 
 void update_group_capacity(struct sched_domain *sd, int cpu)

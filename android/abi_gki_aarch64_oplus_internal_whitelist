@@ -150,3 +150,12 @@ sdio_writeb
 sdio_readb
 sdio_writeb_readb
 #endif/*OPLUS_FEATURE_EXPLORER*/
+
+#ifdef OPLUS_FEATURE_LAST_BOOT_REASON
+vfs_fsync_range
+generic_perform_write
+generic_write_checks
+iov_iter_kvec
+blkdev_get_by_path
+blkdev_fsync
+#endif/*OPLUS_FEATURE_LAST_BOOT_REASON*/

@@ -34,6 +34,7 @@
  * port: native deamon pid
  * caller_pid: binder, caller -> unfreeze (target) UID
  * target_uid: UID want to be unfrozen
+ * persistent: whether to keep target_uid when it's not frozen
  * pkg_cmd: Add/Remove monitored UID
  */
 struct hans_message {
@@ -45,10 +46,12 @@ struct hans_message {
 	int target_pid;  /*unfreeze UID, pkg add/remove UID*/
 	int target_uid;  /*unfreeze UID, pkg add/remove UID*/
 
-        int pkg_cmd;     /*Add/remove monitored uid*/
+	int pkg_cmd;     /*Add/remove monitored uid*/
 
 	int code;
 	char rpc_name[INTERFACETOKEN_BUFF_SIZE];
+
+	int persistent;
 };
 
 /* hans message type definition */
@@ -82,7 +85,7 @@ enum pkg_cmd {
 /* Check if the thread group is frozen */
 static inline bool is_jobctl_frozen(struct task_struct *task)
 {
-        return ((task->jobctl & JOBCTL_TRAP_FREEZE) != 0);
+	return ((task->jobctl & JOBCTL_TRAP_FREEZE) != 0);
 }
 static inline bool is_frozen_tg(struct task_struct *task)
 {
@@ -98,7 +101,7 @@ static inline bool is_zombie_tg(struct task_struct *task)
 }
 
 int hans_report(enum message_type type, int caller_pid, int caller_uid, int target_pid, int target_uid, const char *rpc_name, int code);
-void hans_network_cmd_parse(uid_t uid, enum pkg_cmd cmd);
+void hans_network_cmd_parse(uid_t uid, int persistent, enum pkg_cmd cmd);
 void hans_check_frozen_transcation(uid_t uid, enum message_type type);
 int hans_netfilter_init(void);
 void hans_netfilter_deinit(void);

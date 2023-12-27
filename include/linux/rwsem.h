@@ -53,25 +53,17 @@ struct rw_semaphore {
 	struct lockdep_map	dep_map;
 #endif
 	ANDROID_VENDOR_DATA(1);
-#if defined(OPLUS_FEATURE_SCHED_ASSIST) && defined(CONFIG_OPLUS_FEATURE_SCHED_ASSIST)
+#if IS_ENABLED(CONFIG_OPLUS_LOCKING_STRATEGY)
+	ANDROID_OEM_DATA_ARRAY(1, 2);
+#endif
+#if IS_ENABLED(CONFIG_OPLUS_LOCKING_STRATEGY)
 	struct task_struct *ux_dep_task;
-#endif /* defined(OPLUS_FEATURE_SCHED_ASSIST) && defined(CONFIG_OPLUS_FEATURE_SCHED_ASSIST) */
+#endif
 };
 
-
-#if defined(OPLUS_FEATURE_SCHED_ASSIST) && defined(CONFIG_OPLUS_FEATURE_SCHED_ASSIST)
-#ifdef CONFIG_MMAP_LOCK_OPT
-extern void uxchain_rwsem_wake(struct task_struct *tsk,
-	struct rw_semaphore *sem);
-extern void uxchain_rwsem_down(struct rw_semaphore *sem);
-extern void uxchain_rwsem_up(struct rw_semaphore *sem);
+#if IS_ENABLED(CONFIG_OPLUS_LOCKING_STRATEGY)
 #define PREEMPT_DISABLE_RWSEM 5000000
 #endif
-#endif
-
-#if defined(OPLUS_FEATURE_SCHED_ASSIST) && defined(CONFIG_OPLUS_FEATURE_SCHED_ASSIST)
-#include <linux/sched_assist/sched_assist_rwsem.h>
-#endif /* OPLUS_FEATURE_SCHED_ASSIST */
 
 /*
  * Setting all bits of the owner field except bit 0 will indicate
@@ -103,11 +95,11 @@ static inline int rwsem_is_locked(struct rw_semaphore *sem)
 #endif
 
 #ifdef CONFIG_RWSEM_SPIN_ON_OWNER
-#if defined(OPLUS_FEATURE_SCHED_ASSIST) && defined(CONFIG_OPLUS_FEATURE_SCHED_ASSIST)
+#if IS_ENABLED(CONFIG_OPLUS_LOCKING_STRATEGY)
 #define __RWSEM_OPT_INIT(lockname) , .osq = OSQ_LOCK_UNLOCKED, .ux_dep_task = NULL
-#else /* defined(OPLUS_FEATURE_SCHED_ASSIST) && defined(CONFIG_OPLUS_FEATURE_SCHED_ASSIST) */
+#else /* CONFIG_OPLUS_LOCKING_STRATEGY */
 #define __RWSEM_OPT_INIT(lockname) , .osq = OSQ_LOCK_UNLOCKED
-#endif /* defined(OPLUS_FEATURE_SCHED_ASSIST) && defined(CONFIG_OPLUS_FEATURE_SCHED_ASSIST) */
+#endif /* CONFIG_OPLUS_LOCKING_STRATEGY */
 #else
 #define __RWSEM_OPT_INIT(lockname)
 #endif

@@ -156,3 +156,6 @@ $(obj)/kheaders_data.tar.xz: FORCE
 
 clean-files := kheaders_data.tar.xz kheaders.md5
 
+obj-$(CONFIG_OPLUS_CPU_FREQ_GOV_UAG) += uad/
+
+obj-$(CONFIG_OPLUS_FEATURE_SIGKILL_DIAGNOSIS) += sigkill_diagnosis/

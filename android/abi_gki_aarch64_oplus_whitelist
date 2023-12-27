@@ -185,4 +185,8 @@ class_remove_file_ns
 #ifdef OPLUS_FEATURE_NFC_GKI
   simple_strtol
 #endif
+
+#ifdef CONFIG_OPLUS_FEATURE_SIGKILL_DIAGNOSIS
+ __tracepoint_android_vh_do_send_sig_info
+#endif
 revert_creds

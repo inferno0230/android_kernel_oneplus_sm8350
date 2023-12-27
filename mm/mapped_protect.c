@@ -105,7 +105,12 @@ void mapped_page_try_sorthead(struct page *page)
 		return;
 
 	if (spin_trylock_irq(&pgdat->lru_lock)) {
-		lruvec = mem_cgroup_page_lruvec(page, pgdat);
+#if defined(CONFIG_CONT_PTE_HUGEPAGE) && CONFIG_CONT_PTE_HUGEPAGE_LRU
+		if (ContPteCMAHugePageHead(page))
+			lruvec = mem_cgroup_chp_page_lruvec(page, pgdat);
+		else
+#endif
+			lruvec = mem_cgroup_page_lruvec(page, pgdat);
 		if (PageLRU(page) && !PageUnevictable(page))
 			list_move(&page->lru, &lruvec->lists[lru]);
 		spin_unlock_irq(&pgdat->lru_lock);

@@ -31,6 +31,13 @@
 #include "oplus_ion_boost_pool.h"
 #include <linux/proc_fs.h>
 #endif
+#ifdef CONFIG_CONT_PTE_HUGEPAGE
+#include "../../../mm/chp_ext.h"
+#endif
+
+#ifdef CONFIG_CONT_PTE_HUGEPAGE
+static bool config_hugepage_enable = false;
+#endif
 
 static gfp_t high_order_gfp_flags = (GFP_HIGHUSER | __GFP_ZERO | __GFP_NOWARN |
 				     __GFP_NORETRY) & ~__GFP_RECLAIM;
@@ -142,8 +149,27 @@ static struct page *alloc_buffer_page(struct ion_msm_system_heap *sys_heap,
 	}
 
 normal_alloc:
-	page = ion_msm_page_pool_alloc(pool, from_pool);
-
+#ifdef CONFIG_CONT_PTE_HUGEPAGE
+	/*try get page from hugepage pool when order is HPAGE_CONT_PTE_ORDER*/
+	if ( config_hugepage_enable && (buffer->flags & ION_FLAG_CAMERA_BUFFER) && (vmid <= 0) && pool->order == HPAGE_CONT_PTE_ORDER) {
+		page = ion_msm_page_pool_alloc_pool_only(pool);
+		if (IS_ERR(page)) {
+			page = alloc_chp_ext_wrapper(pool->gfp_mask | __GFP_COMP, CHP_EXT_DMABUF);
+			if(!page){
+				page = ion_msm_page_pool_alloc_pages(pool);
+				if(!page)
+					page = ERR_PTR(-ENOMEM);
+			}
+			*from_pool = false;
+		} else {
+			*from_pool = true;
+		}
+	} else {
+#endif
+		page = ion_msm_page_pool_alloc(pool, from_pool);
+#ifdef CONFIG_CONT_PTE_HUGEPAGE
+	}
+#endif
 	if (pool_auto_refill_en && pool->order &&
 	    pool_count_below_lowmark(pool) && vmid <= 0)
 		wake_up_process(sys_heap->kworker[cached]);
@@ -168,10 +194,22 @@ void free_buffer_page(struct ion_msm_system_heap *heap,
 {
 	bool cached = ion_buffer_cached(buffer);
 	int vmid = get_secure_vmid(buffer->flags);
-
 #ifdef CONFIG_OPLUS_ION_BOOSTPOOL
 	struct ion_boost_pool *boost_pool = has_boost_pool(heap, buffer);
+#endif
 
+#ifdef CONFIG_CONT_PTE_HUGEPAGE
+	/*refill hugepage, if the page is alloc from hugepage pool*/
+	if(config_hugepage_enable && unlikely(is_chp_ext_pages(page, order))){
+		if(vmid > 0)
+			pr_err("%s:comm:%s pid:%d put secure page,vmid:%d!\n",
+				__func__, current->comm, current->pid, vmid);
+		put_page(page);
+		return;
+	}
+#endif
+
+#ifdef CONFIG_OPLUS_ION_BOOSTPOOL
 	if (boost_pool) {
 		if (boost_pool_free(boost_pool, page, order) == 0)
 			return;
@@ -409,7 +447,7 @@ static int ion_msm_system_heap_allocate(struct ion_heap *heap,
 	INIT_LIST_HEAD(&pages_from_pool);
 
 #ifdef CONFIG_OPLUS_ION_BOOSTPOOL
-	if (size < SZ_1M)
+	if (size < SZ_32K)
 		boost_pool = NULL;
 	if (boost_pool) {
 		while (size_remaining > 0) {
@@ -1026,5 +1064,60 @@ destroy_secure_pools:
 	kfree(heap);
 	return ERR_PTR(ret);
 }
+
+#ifdef CONFIG_CONT_PTE_HUGEPAGE
+#define DEFINE_CHP_SYSFS_ATTRIBUTE(__name)				\
+static ssize_t __name ## _show(struct kobject *kobj,			\
+			       struct kobj_attribute *attr, char *buf)	\
+{									\
+	return scnprintf(buf, PAGE_SIZE, "%d\n", config_ ## __name);	\
+}									\
+									\
+static ssize_t __name ## _store(struct kobject *kobj,			\
+				struct kobj_attribute *attr,		\
+				const char *buf, size_t count)		\
+{									\
+	int val, ret;							\
+									\
+	ret = kstrtoint(buf, 10, &val);					\
+	if (ret)							\
+		return ret;						\
+									\
+	config_ ## __name = !!val;					\
+	chp_logi("write val:%d\n", config_ ## __name);			\
+	return count;							\
+}									\
+									\
+static struct kobj_attribute __name ## _attr =				\
+	__ATTR(__name, 0644, __name ## _show,  __name ## _store);	\
+
+
+DEFINE_CHP_SYSFS_ATTRIBUTE(hugepage_enable);
+
+static struct attribute *ion_device_attrs[] = {
+	&hugepage_enable_attr.attr,
+	NULL,
+};
+
+ATTRIBUTE_GROUPS(ion_device);
+
+int msm_ion_init_sysfs(void)
+{
+	struct kobject *ion_kobj;
+	int ret;
+
+	ion_kobj = kobject_create_and_add("msm-ion", kernel_kobj);
+	if (!ion_kobj)
+		return -ENOMEM;
+
+	ret = sysfs_create_groups(ion_kobj, ion_device_groups);
+	if (ret) {
+		kobject_put(ion_kobj);
+		return ret;
+	}
+
+	return 0;
+}
+#endif
 
 MODULE_LICENSE("GPL v2");

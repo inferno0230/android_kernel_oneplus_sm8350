@@ -321,6 +321,9 @@ void __migration_entry_wait(struct mm_struct *mm, pte_t *ptep,
 		goto out;
 
 	page = migration_entry_to_page(entry);
+#ifdef CONFIG_CONT_PTE_HUGEPAGE
+		CHP_BUG_ON(PageCont(page));
+#endif
 	page = compound_head(page);
 
 	/*
@@ -488,6 +491,8 @@ int migrate_page_move_mapping(struct address_space *mapping,
 	if (newzone != oldzone) {
 		__dec_node_state(oldzone->zone_pgdat, NR_FILE_PAGES);
 		__inc_node_state(newzone->zone_pgdat, NR_FILE_PAGES);
+
+		/* FIXME: chp lruvec no care! */
 		if (PageSwapBacked(page) && !PageSwapCache(page)) {
 			__dec_node_state(oldzone->zone_pgdat, NR_SHMEM);
 			__inc_node_state(newzone->zone_pgdat, NR_SHMEM);
@@ -1039,6 +1044,10 @@ static int __unmap_and_move(struct page *page, struct page *newpage,
 
 		lock_page(page);
 	}
+	/* for debugging, detect the migration of subpages */
+#ifdef CONFIG_CONT_PTE_HUGEPAGE
+	CHP_BUG_ON(PageCont(page));
+#endif
 
 	if (PageWriteback(page)) {
 		/*
@@ -2349,12 +2358,13 @@ next:
 		migrate->dst[migrate->npages] = 0;
 		migrate->src[migrate->npages++] = mpfn;
 	}
-	arch_leave_lazy_mmu_mode();
-	pte_unmap_unlock(ptep - 1, ptl);
 
 	/* Only flush the TLB if we actually modified any entries */
 	if (unmapped)
 		flush_tlb_range(walk->vma, start, end);
+
+	arch_leave_lazy_mmu_mode();
+	pte_unmap_unlock(ptep - 1, ptl);
 
 	return 0;
 }

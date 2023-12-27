@@ -904,15 +904,15 @@ static int __dwc3_gadget_ep_disable(struct dwc3_ep *dep)
 	reg &= ~DWC3_DALEPENA_EP(dep->number);
 	dwc3_writel(dwc->regs, DWC3_DALEPENA, reg);
 
+	dep->stream_capable = false;
+	dep->type = 0;
+	dep->flags = 0;
+
 	/* Clear out the ep descriptors for non-ep0 */
 	if (dep->number > 1) {
 		dep->endpoint.comp_desc = NULL;
 		dep->endpoint.desc = NULL;
 	}
-
-	dep->stream_capable = false;
-	dep->type = 0;
-	dep->flags = 0;
 
 	return 0;
 }
@@ -992,13 +992,10 @@ static int dwc3_gadget_ep_disable(struct usb_ep *ep)
 					dep->name))
 		return 0;
 
-	pm_runtime_get_sync(dwc->sysdev);
 	spin_lock_irqsave(&dwc->lock, flags);
 	ret = __dwc3_gadget_ep_disable(dep);
 	dbg_event(dep->number, "DISABLE", ret);
 	spin_unlock_irqrestore(&dwc->lock, flags);
-	pm_runtime_mark_last_busy(dwc->sysdev);
-	pm_runtime_put_autosuspend(dwc->sysdev);
 
 	return ret;
 }
@@ -1143,8 +1140,8 @@ static void __dwc3_prepare_one_trb(struct dwc3_ep *dep, struct dwc3_trb *trb,
 			trb->ctrl = DWC3_TRBCTL_ISOCHRONOUS;
 		}
 
-		/* always enable Interrupt on Missed ISOC */
-		trb->ctrl |= DWC3_TRB_CTRL_ISP_IMI;
+		if (!no_interrupt && !chain)
+			trb->ctrl |= DWC3_TRB_CTRL_ISP_IMI;
 		break;
 
 	case USB_ENDPOINT_XFER_BULK:
@@ -1964,6 +1961,9 @@ int __dwc3_gadget_ep_set_halt(struct dwc3_ep *dep, int value, int protocol)
 
 			if (dep->flags & DWC3_EP_END_TRANSFER_PENDING) {
 				dep->flags |= DWC3_EP_PENDING_CLEAR_STALL;
+				if (protocol)
+					dwc->clear_stall_protocol = dep->number;
+
 				return 0;
 			}
 		}
@@ -2089,6 +2089,7 @@ static int dwc3_gadget_remote_wakeup(struct dwc3 *dwc)
 	case DWC3_LINK_STATE_RESET:
 	case DWC3_LINK_STATE_RX_DET:	/* in HS, means Early Suspend */
 	case DWC3_LINK_STATE_U3:	/* in HS, means SUSPEND */
+	case DWC3_LINK_STATE_U2:	/* in HS, means Sleep (L1) */
 	case DWC3_LINK_STATE_RESUME:
 		break;
 	case DWC3_LINK_STATE_U1:
@@ -3152,7 +3153,9 @@ static void dwc3_gadget_free_endpoints(struct dwc3 *dwc)
 			list_del(&dep->endpoint.ep_list);
 		}
 
-		debugfs_remove_recursive(debugfs_lookup(dep->name, dwc->root));
+		debugfs_remove_recursive(debugfs_lookup(dep->name,
+				debugfs_lookup(dev_name(dep->dwc->dev),
+					       usb_debug_root)));
 		kfree(dep);
 	}
 }
@@ -3215,6 +3218,10 @@ static int dwc3_gadget_ep_reclaim_completed_trb(struct dwc3_ep *dep,
 		return 1;
 
 	if (event->status & DEPEVT_STATUS_SHORT && !chain)
+		return 1;
+
+	if ((trb->ctrl & DWC3_TRB_CTRL_ISP_IMI) &&
+	    DWC3_TRB_SIZE_TRBSTS(trb->size) == DWC3_TRBSTS_MISSED_ISOC)
 		return 1;
 
 	if ((trb->ctrl & DWC3_TRB_CTRL_IOC) ||
@@ -3508,7 +3515,7 @@ static void dwc3_endpoint_interrupt(struct dwc3 *dwc,
 				}
 
 				dep->flags &= ~(DWC3_EP_STALL | DWC3_EP_WEDGE);
-				if (dwc->delayed_status)
+				if (dwc->clear_stall_protocol == dep->number)
 					dwc3_ep0_send_delayed_status(dwc);
 			}
 
@@ -4483,7 +4490,7 @@ int dwc3_gadget_init(struct dwc3 *dwc)
 		dev_info(dwc->dev, "changing max_speed on rev %08x\n",
 				dwc->revision);
 
-	dwc->gadget.max_speed		= dwc->maximum_speed;
+	dwc->gadget.max_speed		= dwc->max_hw_supp_speed;
 
 	/*
 	 * REVISIT: Here we should clear all pending IRQs to be

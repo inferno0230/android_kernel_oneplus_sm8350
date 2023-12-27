@@ -14,6 +14,9 @@
 #include <trace/events/power.h>
 #include <linux/sched/sysctl.h>
 #include <trace/hooks/sched.h>
+#ifdef CONFIG_OPLUS_FEATURE_OCH
+#include <linux/cpufreq_health.h>
+#endif
 
 #ifdef CONFIG_OPLUS_FEATURE_FRAME_BOOST
 #include "../tuning/frame_group.h"
@@ -33,6 +36,13 @@ static unsigned int default_target_loads[] = {DEFAULT_TARGET_LOAD};
 
 #ifdef CONFIG_OPLUS_FEATURE_SUGOV_POWER_EFFIENCY
 #include <linux/cpufreq_effiency.h>
+#endif
+
+#ifdef CONFIG_OPLUS_FEATURE_VT_CAP
+#include <linux/sched_assist/eas_opt/oplus_cap.h>
+#endif
+#ifdef CONFIG_OPLUS_CPUFREQ_IOWAIT_PROTECT
+#include <linux/sched_assist/eas_opt/oplus_iowait.h>
 #endif
 
 struct sugov_tunables {
@@ -87,6 +97,11 @@ struct sugov_policy {
 #ifdef CONFIG_OPLUS_FEATURE_FRAME_BOOST
 	unsigned int flags;
 #endif
+
+#ifdef CONFIG_OPLUS_FEATURE_OCH
+	int newtask_flag;
+#endif
+
 };
 
 struct sugov_cpu {
@@ -466,6 +481,9 @@ static unsigned int get_next_freq(struct sugov_policy *sg_policy,
 
 	sg_policy->need_freq_update = false;
 	sg_policy->cached_raw_freq = freq;
+#ifdef CONFIG_OPLUS_FEATURE_OCH
+	cpufreq_health_get_newtask_state(policy, sg_policy->newtask_flag);
+#endif
 	return cpufreq_driver_resolve_freq(policy, freq);
 }
 
@@ -613,7 +631,7 @@ static bool sugov_iowait_reset(struct sugov_cpu *sg_cpu, u64 time,
 	unsigned int ticks = TICK_NSEC;
 
 #ifdef CONFIG_OPLUS_CPUFREQ_IOWAIT_PROTECT
-	if (sysctl_iowait_reset_ticks)
+	if (sysctl_oplus_iowait_boost_enabled && sysctl_iowait_reset_ticks)
 		ticks = sysctl_iowait_reset_ticks * TICK_NSEC;
 #endif
 
@@ -708,7 +726,7 @@ static unsigned long sugov_iowait_apply(struct sugov_cpu *sg_cpu, u64 time,
 
 #ifdef CONFIG_OPLUS_CPUFREQ_IOWAIT_PROTECT
 	if (!sg_cpu->iowait_boost_pending &&
-	    (!sysctl_iowait_apply_ticks ||
+	    (!sysctl_oplus_iowait_boost_enabled || !sysctl_iowait_apply_ticks ||
 	     (time - sg_policy->last_update > (sysctl_iowait_apply_ticks * TICK_NSEC)))) {
 #else
 	if (!sg_cpu->iowait_boost_pending) {
@@ -775,8 +793,14 @@ static void sugov_walt_adjust(struct sugov_cpu *sg_cpu, unsigned long *util,
 	if (is_hiload && !is_migration)
 		*util = max(*util, sg_policy->hispeed_util);
 
-	if (is_hiload && nl >= mult_frac(cpu_util, NL_RATIO, 100))
+	if (is_hiload && nl >= mult_frac(cpu_util, NL_RATIO, 100)) {
 		*util = *max;
+#ifdef CONFIG_OPLUS_FEATURE_OCH
+		sg_policy->newtask_flag = 1;
+	} else {
+		sg_policy->newtask_flag = 0;
+#endif
+	}
 
 	if (sg_policy->tunables->pl) {
 		if (conservative_pl())
@@ -816,6 +840,18 @@ static void sugov_update_single(struct update_util_data *hook, u64 time,
 #ifdef CONFIG_OPLUS_FEATURE_FRAME_BOOST
 	struct cpufreq_policy *policy = sg_policy->policy;
 	unsigned long irq_flags;
+#endif
+#ifdef CONFIG_OPLUS_FEATURE_VT_CAP
+#ifndef CONFIG_OPLUS_FEATURE_FRAME_BOOST
+	struct cpufreq_policy *policy = sg_policy->policy;
+#endif
+	struct rq *rq = cpu_rq(sg_cpu->cpu);
+	unsigned long util_thresh = 0;
+	unsigned int avg_nr_running = 1;
+	int cluster_id = topology_physical_package_id(cpumask_first(policy->cpus));
+	unsigned long util_orig;
+#endif
+#ifdef CONFIG_OPLUS_FEATURE_FRAME_BOOST
 	sg_policy->flags = flags;
 #endif
 
@@ -866,6 +902,21 @@ static void sugov_update_single(struct update_util_data *hook, u64 time,
 	fbg_freq_policy_util(sg_policy->flags, policy->cpus, &util);
 	raw_spin_unlock_irqrestore(&sg_policy->update_lock, irq_flags);
 #endif
+
+#ifdef CONFIG_OPLUS_FEATURE_VT_CAP
+	if (eas_opt_enable && (util_thresh_percent[cluster_id] != 100)) {
+		util_thresh = max * util_thresh_cvt[cluster_id] >> SCHED_CAPACITY_SHIFT;
+		avg_nr_running = rq->nr_running;
+		util_orig = util;
+		util = (util_thresh < util) ?
+			(util_thresh + ((avg_nr_running * (util - util_thresh) * nr_oplus_cap_multiple[cluster_id]) >> SCHED_CAPACITY_SHIFT)) : util;
+		if (unlikely(eas_opt_debug_enable))
+			trace_printk("[eas_opt]: cluster_id: %d, capacity: %d, util_thresh: %d, util_orig: %d, "
+					"util: %d, avg_nr_running: %d, oplus_cap_multiple: %d,nr_oplus_cap_multiple: %d, util_thresh: %d\n",
+					cluster_id, max, util_thresh, util_orig, util, avg_nr_running,
+					oplus_cap_multiple[cluster_id], nr_oplus_cap_multiple[cluster_id], util_thresh_percent[cluster_id]);
+	}
+#endif
 	next_f = get_next_freq(sg_policy, util, max);
 	/*
 	 * Do not reduce the frequency if the CPU has not been idle
@@ -899,11 +950,23 @@ static unsigned int sugov_next_freq_shared(struct sugov_cpu *sg_cpu, u64 time)
 	u64 last_freq_update_time = sg_policy->last_freq_update_time;
 	unsigned long util = 0, max = 1;
 	unsigned int j;
+#ifdef CONFIG_OPLUS_FEATURE_VT_CAP
+	unsigned long util_thresh = 0;
+	unsigned long util_orig = 0;
+	unsigned int avg_nr_running = 1;
+	unsigned int count_cpu = 0;
+	int cluster_id = topology_physical_package_id(cpumask_first(policy->cpus));
+#endif
 
 	for_each_cpu(j, policy->cpus) {
 		struct sugov_cpu *j_sg_cpu = &per_cpu(sugov_cpu, j);
 		unsigned long j_util, j_max;
 		s64 delta_ns;
+#ifdef CONFIG_OPLUS_FEATURE_VT_CAP
+		struct rq *rq = cpu_rq(j);
+		avg_nr_running += rq->nr_running;
+		count_cpu ++;
+#endif
 
 		/*
 		 * If the CPU utilization was last updated before the previous
@@ -941,6 +1004,22 @@ static unsigned int sugov_next_freq_shared(struct sugov_cpu *sg_cpu, u64 time)
 #ifdef CONFIG_OPLUS_FEATURE_FRAME_BOOST
 	fbg_freq_policy_util(sg_policy->flags, policy->cpus, &util);
 #endif
+
+#ifdef CONFIG_OPLUS_FEATURE_VT_CAP
+	if (eas_opt_enable && (oplus_cap_multiple[cluster_id] != 100 || util_thresh_percent[cluster_id] != 100) && count_cpu) {
+		util_thresh = max * util_thresh_cvt[cluster_id] >> SCHED_CAPACITY_SHIFT;
+		avg_nr_running = mult_frac(avg_nr_running, 1, count_cpu);
+		util_orig = util;
+		util = (util_thresh < util) ?
+			(util_thresh + ((avg_nr_running * (util - util_thresh)* nr_oplus_cap_multiple[cluster_id]) >> SCHED_CAPACITY_SHIFT)) : util;
+		if (unlikely(eas_opt_debug_enable))
+			trace_printk("[eas_opt]: cluster_id: %d, capacity: %d, util_thresh: %d, util_orig: %d, util: %d, avg_nr_running: %d, "
+					"oplus_cap_multiple: %d,nr_oplus_cap_multiple: %d, util_thresh: %d\n",
+					cluster_id, max, util_thresh, util_orig, util, avg_nr_running,
+					oplus_cap_multiple[cluster_id], nr_oplus_cap_multiple[cluster_id], util_thresh_percent[cluster_id]);
+	}
+#endif
+
 	return get_next_freq(sg_policy, util, max);
 }
 
@@ -1618,11 +1697,26 @@ static void sugov_exit(struct cpufreq_policy *policy)
 	sugov_policy_free(sg_policy);
 	cpufreq_disable_fast_switch(policy);
 }
+#ifdef CONFIG_OPLUS_FEATURE_SUGOV_TL
+void sugov_update_util_tl(void *data, unsigned long util, unsigned long freq,
+			unsigned long cap, unsigned long *max_util, struct cpufreq_policy *policy,
+			bool *need_freq_update)
+{
+	struct sugov_policy *sg_policy = policy->governor_data;
+	unsigned int freq_cur = policy->cur;
+	unsigned int tl = freq_to_targetload(sg_policy->tunables, freq_cur);
+	*max_util = *max_util * 100 / tl;
+}
+#endif
 
 static int sugov_start(struct cpufreq_policy *policy)
 {
 	struct sugov_policy *sg_policy = policy->governor_data;
 	unsigned int cpu;
+#ifdef CONFIG_OPLUS_FEATURE_SUGOV_TL
+	unsigned int first_cpu;
+	int cluster_id;
+#endif
 
 	sg_policy->up_rate_delay_ns =
 		sg_policy->tunables->up_rate_limit_us * NSEC_PER_USEC;
@@ -1637,6 +1731,13 @@ static int sugov_start(struct cpufreq_policy *policy)
 	sg_policy->cached_raw_freq		= 0;
 #ifdef CONFIG_OPLUS_FEATURE_FRAME_BOOST
 	sg_policy->flags	= 0;
+#endif
+#ifdef CONFIG_OPLUS_FEATURE_SUGOV_TL
+	first_cpu = cpumask_first(policy->related_cpus);
+	cluster_id = topology_physical_package_id(first_cpu);
+	g_em_map_util_freq.cem_map_util_freq[cluster_id].pgov_map_func = sugov_update_util_tl;
+	g_em_map_util_freq.cem_map_util_freq[cluster_id].gov_id = 1;
+	//register_trace_android_vh_map_util_freq(sugov_update_util_tl, NULL);
 #endif
 
 	for_each_cpu(cpu, policy->cpus) {
@@ -1665,9 +1766,21 @@ static void sugov_stop(struct cpufreq_policy *policy)
 {
 	struct sugov_policy *sg_policy = policy->governor_data;
 	unsigned int cpu;
+#ifdef CONFIG_OPLUS_FEATURE_SUGOV_TL
+	unsigned int first_cpu;
+	int cluster_id;
+#endif
 
 	for_each_cpu(cpu, policy->cpus)
 		cpufreq_remove_update_util_hook(cpu);
+
+#ifdef CONFIG_OPLUS_FEATURE_SUGOV_TL
+	first_cpu = cpumask_first(policy->related_cpus);
+	cluster_id = topology_physical_package_id(first_cpu);
+	g_em_map_util_freq.cem_map_util_freq[cluster_id].pgov_map_func = default_em_map_util_freq;
+	g_em_map_util_freq.cem_map_util_freq[cluster_id].gov_id = 0;
+//	unregister_trace_android_vh_map_util_freq(sugov_update_util_tl, NULL);
+#endif
 
 	synchronize_rcu();
 

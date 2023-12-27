@@ -40,7 +40,7 @@ static struct task_struct *enable_owner;
 static int prepare_refcnt;
 static int enable_refcnt;
 #if defined(OPLUS_FEATURE_POWERINFO_STANDBY_DEBUG) && defined(CONFIG_OPLUS_POWERINFO_STANDBY_DEBUG)
-static unsigned int debug_suspend_flag = 1;
+static unsigned int debug_suspend_flag = 0;
 #endif
 
 static HLIST_HEAD(clk_root_list);
@@ -864,10 +864,9 @@ static void clk_core_unprepare(struct clk_core *core)
 	if (core->ops->unprepare)
 		core->ops->unprepare(core->hw);
 
-	clk_pm_runtime_put(core);
-
 	trace_clk_unprepare_complete(core);
 	clk_core_unprepare(core->parent);
+	clk_pm_runtime_put(core);
 }
 
 static void clk_core_unprepare_lock(struct clk_core *core)

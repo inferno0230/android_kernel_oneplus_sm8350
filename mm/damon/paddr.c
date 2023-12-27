@@ -239,7 +239,7 @@ static unsigned long damon_pa_apply_scheme(struct damon_ctx *ctx,
 	}
 	applied = reclaim_pages(&page_list);
 	cond_resched();
-	printk("[damon_reclaim] reclaimed %lld pages\n", applied);
+	pr_debug("[damon_reclaim] reclaimed %lld pages\n", applied);
 	nr_reclaim_page = nr_reclaim_page + applied;
 	return applied * PAGE_SIZE;
 }

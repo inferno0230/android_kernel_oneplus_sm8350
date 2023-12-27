@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (c) 2020-2021, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2023 Qualcomm Innovation Center, Inc. All rights reserved.
  */
 
 #include "adreno.h"
@@ -903,6 +904,23 @@ int adreno_hwsched_queue_cmds(struct kgsl_device_private *dev_priv,
 
 	user_ts = *timestamp;
 
+	/*
+	 * If there is only one drawobj in the array and it is of
+	 * type SYNCOBJ_TYPE, skip comparing user_ts as it can be 0
+	 */
+	if (!(count == 1 && drawobj[0]->type == SYNCOBJ_TYPE) &&
+		(drawctxt->base.flags & KGSL_CONTEXT_USER_GENERATED_TS)) {
+		/*
+		 * User specified timestamps need to be greater than the last
+		 * issued timestamp in the context
+		 */
+		if (timestamp_cmp(drawctxt->timestamp, user_ts) >= 0) {
+			spin_unlock(&drawctxt->lock);
+			kmem_cache_free(jobs_cache, job);
+			return -ERANGE;
+		}
+	}
+
 	for (i = 0; i < count; i++) {
 
 		switch (drawobj[i]->type) {
@@ -1424,6 +1442,14 @@ void adreno_hwsched_parse_fault_cmdobj(struct adreno_device *adreno_dev,
 {
 	struct adreno_hwsched *hwsched = to_hwsched(adreno_dev);
 	struct cmd_list_obj *obj, *tmp;
+
+	/*
+	 * During IB parse, vmalloc is called which can sleep and
+	 * should not be called from atomic context. Since IBs are not
+	 * dumped during atomic snapshot, there is no need to parse it.
+	 */
+	if (adreno_dev->dev.snapshot_atomic)
+		return;
 
 	list_for_each_entry_safe(obj, tmp, &hwsched->cmd_list, node) {
 		struct kgsl_drawobj_cmd *cmdobj = obj->cmdobj;

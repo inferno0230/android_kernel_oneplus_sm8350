@@ -49,7 +49,8 @@
 #endif
 
 #if IS_ENABLED(CONFIG_OPLUS_FEATURE_CPU_JANKINFO)
-#include <linux/cpu_jankinfo/sa_jankinfo.h>
+#include <linux/sched_assist/sa_jankinfo.h>
+#include <linux/sched_info/osi_tasktrack.h>
 #endif
 
 #ifdef CONFIG_OPLUS_FEATURE_FRAME_BOOST
@@ -94,11 +95,6 @@ const_debug unsigned int sysctl_sched_features =
  * Limited because this is done with IRQs disabled.
  */
 const_debug unsigned int sysctl_sched_nr_migrate = 32;
-
-#ifdef CONFIG_OPLUS_CPUFREQ_IOWAIT_PROTECT
-unsigned int sysctl_iowait_reset_ticks = 1;
-unsigned int sysctl_iowait_apply_ticks = 0;
-#endif
 
 /*
  * period over which we measure -rt task CPU usage in us.
@@ -3973,6 +3969,16 @@ void scheduler_tick(void)
 #endif
 
 	trace_android_vh_scheduler_tick(rq);
+#if IS_ENABLED(CONFIG_OPLUS_FEATURE_CPU_JANKINFO)
+#if defined(CONFIG_OPLUS_FEATURE_SCHED_UX_PRIORITY) && defined(OPLUS_FEATURE_SCHED_ASSIST)
+	osi_scheduler_tick_handler(NULL, rq);
+#endif
+#endif
+#if defined(OPLUS_FEATURE_SCHED_ASSIST) && defined(CONFIG_OPLUS_FEATURE_SCHED_ASSIST)
+#if IS_ENABLED(CONFIG_OPLUS_FEATURE_SCHED_UX_PRIORITY)
+	android_vh_scheduler_tick_handler(rq);
+#endif
+#endif
 #if defined(OPLUS_FEATURE_SCHED_ASSIST) && defined(CONFIG_OPLUS_FEATURE_SCHED_SPREAD)
 	update_rq_nr_imbalance(cpu);
 #endif
@@ -4230,8 +4236,7 @@ static noinline void __schedule_bug(struct task_struct *prev)
 		print_ip_sym(preempt_disable_ip);
 		pr_cont("\n");
 	}
-	if (panic_on_warn)
-		panic("scheduling while atomic\n");
+	check_panic_on_warn("scheduling while atomic");
 
 #ifdef CONFIG_PANIC_ON_SCHED_BUG
 	BUG();
@@ -4431,7 +4436,6 @@ static void __sched notrace __schedule(bool preempt)
 	clear_preempt_need_resched();
 
 	wallclock = sched_ktime_clock();
-
 #if IS_ENABLED(CONFIG_OPLUS_FEATURE_CPU_JANKINFO)
 	jankinfo_android_rvh_schedule_handler(NULL, prev, next, rq);
 #endif
@@ -4472,7 +4476,14 @@ static void __sched notrace __schedule(bool preempt)
 		trace_sched_switch(preempt, prev, next);
 #if defined(OPLUS_FEATURE_SCHED_ASSIST) && defined(CONFIG_OPLUS_FEATURE_SCHED_ASSIST)
 		ux_state_systrace_c(cpu_of(rq), next);
+#if IS_ENABLED(CONFIG_OPLUS_FEATURE_SCHED_UX_PRIORITY)
+		ux_priority_systrace_c(cpu_of(rq), next);
+#endif
 		sa_scene_systrace_c();
+#endif
+
+#ifdef CONFIG_LOCKING_PROTECT
+		locking_state_systrace_c(cpu_of(rq), next);
 #endif
 
 #if defined(OPLUS_FEATURE_TASK_CPUSTATS) && defined(CONFIG_OPLUS_SCHED)
@@ -5825,6 +5836,11 @@ long sched_setaffinity(pid_t pid, const struct cpumask *in_mask)
 		}
 		rcu_read_unlock();
 	}
+
+#if defined(OPLUS_FEATURE_SCHED_ASSIST) && defined(CONFIG_OPLUS_FEATURE_SCHED_ASSIST)
+	if (oplus_sched_ban_setaffinity(p, in_mask))
+		goto out_free_new_mask;
+#endif
 
 	retval = security_task_setscheduler(p);
 	if (retval)
@@ -7526,7 +7542,9 @@ static int sched_colocate_write(struct cgroup_subsys_state *css,
 		return -EPERM;
 
 	tg->wtg.colocate = !!colocate;
+#ifndef CONFIG_OPLUS_FEATURE_FRAME_BOOST
 	tg->wtg.colocate_update_disabled = true;
+#endif
 	return 0;
 }
 

@@ -3,6 +3,8 @@
 #define _LINUX_SCHED_SYSCTL_H
 
 #include <linux/types.h>
+#include <linux/threads.h>
+#include <linux/cache.h>
 
 struct ctl_table;
 
@@ -115,11 +117,6 @@ extern __read_mostly unsigned int sysctl_sched_nr_migrate;
 int sched_proc_update_handler(struct ctl_table *table, int write,
 		void __user *buffer, size_t *length,
 		loff_t *ppos);
-#endif
-
-#ifdef CONFIG_OPLUS_CPUFREQ_IOWAIT_PROTECT
-extern unsigned int sysctl_iowait_reset_ticks;
-extern unsigned int sysctl_iowait_apply_ticks;
 #endif
 
 /*

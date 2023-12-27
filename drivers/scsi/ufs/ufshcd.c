@@ -2120,6 +2120,11 @@ void ufshcd_send_command(struct ufs_hba *hba, unsigned int task_tag)
 	ufshcd_add_command_trace(hba, task_tag, "send");
 	ufshcd_clk_scaling_start_busy(hba);
 	__set_bit(task_tag, &hba->outstanding_reqs);
+	if (hba->uic_link_state == UIC_LINK_HIBERN8_STATE) {
+	    dev_err(hba->dev, "ufshcd_send_command error when UIC_LINK_HIBERN8_STATE\n");
+	    dump_stack();
+	}
+
 	ufshcd_writel(hba, 1 << task_tag, REG_UTP_TRANSFER_REQ_DOOR_BELL);
 	/* Make sure that doorbell is committed immediately */
 	wmb();
@@ -5345,6 +5350,7 @@ static void __ufshcd_transfer_req_compl(struct ufs_hba *hba,
 				     cmd->cmnd[0], index, hba->outstanding_reqs);
 #endif
 #endif /* OPLUS_FEATURE_UFSPLUS */
+			trace_android_vh_ufs_compl_command(hba, lrbp);
 			ufshcd_add_command_trace(hba, index, "complete");
 			result = ufshcd_transfer_rsp_status(hba, lrbp);
 			scsi_dma_unmap(cmd);
@@ -5372,6 +5378,7 @@ static void __ufshcd_transfer_req_compl(struct ufs_hba *hba,
 			lrbp->command_type == UTP_CMD_TYPE_UFS_STORAGE) {
 			lrbp->compl_time_stamp = ktime_get();
 			if (hba->dev_cmd.complete) {
+				trace_android_vh_ufs_compl_command(hba, lrbp);
 				ufshcd_add_command_trace(hba, index,
 						"dev_complete");
 				complete(hba->dev_cmd.complete);
@@ -6031,7 +6038,12 @@ static inline void ufshcd_schedule_eh_work(struct ufs_hba *hba)
 
 static void ufshcd_err_handling_prepare(struct ufs_hba *hba)
 {
+#if defined(CONFIG_SCSI_UFSHCD_QTI)
+	if (!hba->abort_triggered_wlun)
+		pm_runtime_get_sync(hba->dev);
+#else
 	pm_runtime_get_sync(hba->dev);
+#endif
 	if (pm_runtime_suspended(hba->dev)) {
 		/*
 		 * Don't assume anything of pm_runtime_get_sync(), if
@@ -6063,7 +6075,13 @@ static void ufshcd_err_handling_unprepare(struct ufs_hba *hba)
 	ufshcd_release(hba);
 	if (hba->clk_scaling.is_allowed)
 		ufshcd_resume_clkscaling(hba);
+#if defined(CONFIG_SCSI_UFSHCD_QTI)
+	if (!hba->abort_triggered_wlun)
+		pm_runtime_put(hba->dev);
+	hba->abort_triggered_wlun = false;
+#else
 	pm_runtime_put(hba->dev);
+#endif
 }
 
 static inline bool ufshcd_err_handling_should_stop(struct ufs_hba *hba)
@@ -6988,8 +7006,15 @@ static int ufshcd_abort(struct scsi_cmnd *cmd)
 	 * To avoid these unnecessary/illegal step we skip to the last error
 	 * handling stage: reset and restore.
 	 */
+#if defined(CONFIG_SCSI_UFSHCD_QTI)
+	if (lrbp->lun == UFS_UPIU_UFS_DEVICE_WLUN) {
+		hba->abort_triggered_wlun = true;
+		return ufshcd_eh_host_reset_handler(cmd);
+	}
+#else
 	if (lrbp->lun == UFS_UPIU_UFS_DEVICE_WLUN)
 		return ufshcd_eh_host_reset_handler(cmd);
+#endif
 
 	ufshcd_hold(hba, false);
 	reg = ufshcd_readl(hba, REG_UTP_TRANSFER_REQ_DOOR_BELL);
@@ -9513,6 +9538,22 @@ static int ufshcd_resume(struct ufs_hba *hba, enum ufs_pm_op pm_op)
 
 	if (!ufshcd_is_ufs_dev_active(hba)) {
 		ret = ufshcd_set_dev_pwr_mode(hba, UFS_ACTIVE_PWR_MODE);
+#if defined(CONFIG_SCSI_UFSHCD_QTI)
+		if (ret) {
+			if (ufshcd_is_ufs_dev_active(hba) &&
+					ufshcd_is_link_active(hba)) {
+				ret = 0;
+				dev_err(hba->dev, "UFS device and link are Active\n");
+			} else if ((work_pending(&hba->eh_work)) ||
+					ufshcd_eh_in_progress(hba)) {
+				flush_work(&hba->eh_work);
+				ret = 0;
+				dev_err(hba->dev, "dev pwr mode=%d, UIC link state=%d\n",
+						hba->curr_dev_pwr_mode,
+						hba->uic_link_state);
+			}
+		}
+#endif
 		if (ret)
 			goto set_old_link_state;
 	}

@@ -364,6 +364,8 @@ static void kgsl_destroy_ion(struct kgsl_memdesc *memdesc)
 
 	if (meta != NULL) {
 		remove_dmabuf_list(meta);
+		dma_buf_unmap_attachment(meta->attach, meta->table,
+			DMA_BIDIRECTIONAL);
 		dma_buf_detach(meta->dmabuf, meta->attach);
 		dma_buf_put(meta->dmabuf);
 		kfree(meta);
@@ -650,14 +652,6 @@ static int kgsl_procinfo_show(struct seq_file *s, void *unused)
 }
 DEFINE_PROC_SHOW_ATTRIBUTE(kgsl_procinfo);
 
-long read_kgsl_mem_usage(enum mtrack_subtype type)
-{
-	if (type == MTRACK_GPU_TOTAL)
-		return atomic_long_read(&kgsl_driver.stats.page_alloc) >> PAGE_SHIFT;
-
-	return 0;
-}
-
 void dump_kgsl_usage_stat(bool verbose)
 {
 	struct kgsl_process_private *p;
@@ -673,6 +667,24 @@ void dump_kgsl_usage_stat(bool verbose)
 	}
 	read_unlock(&kgsl_driver.proclist_lock);
 }
+
+void check_gpu_total_usage(unsigned long val)
+{
+    if ((val >> 10) >= 5242880) {
+	osvelte_info("++++++++++ %s ++++++++\n", "check_gpu_total_usage");
+        dump_kgsl_usage_stat(false);
+    }
+}
+
+long read_kgsl_mem_usage(enum mtrack_subtype type)
+{
+	if (type == MTRACK_GPU_TOTAL) {
+		check_gpu_total_usage((unsigned long)atomic_long_read(&kgsl_driver.stats.page_alloc));
+		return atomic_long_read(&kgsl_driver.stats.page_alloc) >> PAGE_SHIFT;
+    	}
+	return 0;
+}
+
 
 long read_pid_kgsl_mem_usage(enum mtrack_subtype mtype, pid_t pid)
 {
@@ -787,8 +799,7 @@ int kgsl_context_init(struct kgsl_device_private *dev_priv,
 		 * flushing the event workqueue just in case there are
 		 * detached contexts waiting to finish
 		 */
-
-		flush_workqueue(device->events_wq);
+		kthread_flush_worker(&kgsl_driver.ev_worker);
 		id = _kgsl_get_context_id(device);
 	}
 
@@ -2141,6 +2152,10 @@ long kgsl_ioctl_gpu_aux_command(struct kgsl_device_private *dev_priv,
 		(KGSL_GPU_AUX_COMMAND_TIMELINE)))
 		return -EINVAL;
 
+	if ((param->flags & KGSL_GPU_AUX_COMMAND_SYNC) &&
+		(param->numsyncs > KGSL_MAX_SYNCPOINTS))
+		return -EINVAL;
+
 	context = kgsl_context_get_owner(dev_priv, param->context_id);
 	if (!context)
 		return -EINVAL;
@@ -2345,7 +2360,7 @@ static void gpumem_free_func(struct kgsl_device *device,
 			entry->memdesc.gpuaddr, entry->memdesc.size,
 			entry->memdesc.flags);
 
-	kgsl_mem_entry_put(entry);
+	kgsl_mem_entry_put_deferred(entry);
 }
 
 static long gpumem_free_entry_on_timestamp(struct kgsl_device *device,
@@ -2623,6 +2638,15 @@ static int memdesc_sg_virt(struct kgsl_memdesc *memdesc, unsigned long useraddr)
 
 	ret = sg_alloc_table_from_pages(memdesc->sgt, pages, npages,
 					0, memdesc->size, GFP_KERNEL);
+
+	if (ret)
+		goto out;
+
+	ret = kgsl_cache_range_op(memdesc, 0, memdesc->size,
+			KGSL_CACHE_OP_FLUSH);
+
+	if (ret)
+		sg_free_table(memdesc->sgt);
 out:
 	if (ret) {
 		for (i = 0; i < npages; i++)
@@ -3122,8 +3146,6 @@ static int kgsl_setup_dma_buf(struct kgsl_device *device,
 		ret = PTR_ERR(sg_table);
 		goto out;
 	}
-
-	dma_buf_unmap_attachment(attach, sg_table, DMA_BIDIRECTIONAL);
 
 	meta->table = sg_table;
 	entry->priv_data = meta;
@@ -4417,6 +4439,9 @@ static void _unregister_device(struct kgsl_device *device)
 {
 	int minor;
 
+	if (device->gpu_sysfs_kobj.state_initialized)
+		kobject_del(&device->gpu_sysfs_kobj);
+
 	mutex_lock(&kgsl_driver.devlock);
 	for (minor = 0; minor < ARRAY_SIZE(kgsl_driver.devp); minor++) {
 		if (device == kgsl_driver.devp[minor]) {
@@ -4614,24 +4639,6 @@ int kgsl_device_platform_probe(struct kgsl_device *device)
 	idr_init(&device->timelines);
 	spin_lock_init(&device->timelines_lock);
 
-#if defined(OPLUS_FEATURE_SCHED_ASSIST) && defined(CONFIG_OPLUS_FEATURE_SCHED_ASSIST)
-	if (sysctl_sched_assist_enabled)
-		device->events_wq = alloc_workqueue("kgsl-events",
-			WQ_UNBOUND | WQ_MEM_RECLAIM | WQ_SYSFS | WQ_HIGHPRI | WQ_UX, 0);
-	else
-		device->events_wq = alloc_workqueue("kgsl-events",
-			WQ_UNBOUND | WQ_MEM_RECLAIM | WQ_SYSFS | WQ_HIGHPRI, 0);
-#else
-	device->events_wq = alloc_workqueue("kgsl-events",
-		WQ_UNBOUND | WQ_MEM_RECLAIM | WQ_SYSFS | WQ_HIGHPRI, 0);
-#endif
-
-	if (!device->events_wq) {
-		dev_err(device->dev, "Failed to allocate events workqueue\n");
-		status = -ENOMEM;
-		goto error_pwrctrl_close;
-	}
-
 	/* This can return -EPROBE_DEFER */
 	status = kgsl_mmu_probe(device);
 	if (status != 0)
@@ -4650,11 +4657,6 @@ int kgsl_device_platform_probe(struct kgsl_device *device)
 	return 0;
 
 error_pwrctrl_close:
-	if (device->events_wq) {
-		destroy_workqueue(device->events_wq);
-		device->events_wq = NULL;
-	}
-
 	kgsl_pwrctrl_close(device);
 error:
 	_unregister_device(device);
@@ -4663,15 +4665,7 @@ error:
 
 void kgsl_device_platform_remove(struct kgsl_device *device)
 {
-	if (device->events_wq) {
-		destroy_workqueue(device->events_wq);
-		device->events_wq = NULL;
-	}
-
 	kgsl_device_snapshot_close(device);
-
-	if (device->gpu_sysfs_kobj.state_initialized)
-		kobject_del(&device->gpu_sysfs_kobj);
 
 	idr_destroy(&device->context_idr);
 	idr_destroy(&device->timelines);
@@ -4742,6 +4736,7 @@ int __init kgsl_core_init(void)
 {
 	int result = 0;
 	struct sched_param param = { .sched_priority = 2 };
+	struct sched_param param2 = { .sched_priority = 97 };
 
 	place_marker("M - DRIVER KGSL Init");
 
@@ -4828,6 +4823,17 @@ int __init kgsl_core_init(void)
 
 	kthread_init_worker(&kgsl_driver.worker);
 
+	kthread_init_worker(&kgsl_driver.ev_worker);
+
+	kgsl_driver.ev_worker_thread =
+		kthread_run(kthread_worker_fn, &kgsl_driver.ev_worker,
+			    "kgsl_ev_worker_thread");
+
+	if (IS_ERR(kgsl_driver.ev_worker_thread)) {
+		pr_err("unable to start kgsl_ev_worker_thread\n");
+		goto err;
+	}
+
 	kgsl_driver.worker_thread = kthread_run(kthread_worker_fn,
 		&kgsl_driver.worker, "kgsl_worker_thread");
 
@@ -4837,6 +4843,8 @@ int __init kgsl_core_init(void)
 	}
 
 	sched_setscheduler(kgsl_driver.worker_thread, SCHED_FIFO, &param);
+	sched_setscheduler_nocheck(kgsl_driver.ev_worker_thread, SCHED_FIFO,
+				   &param2);
 
 #if defined(OPLUS_FEATURE_SCHED_ASSIST) && defined(CONFIG_OPLUS_FEATURE_SCHED_ASSIST)
 	kgsl_driver.worker_thread->ux_state = SA_TYPE_LIGHT;

@@ -4,7 +4,8 @@ menu "Data Access Monitoring"
 
 config DAMON
 	bool "DAMON: Data Access Monitoring Framework"
-	default y
+	depends on !CONT_PTE_HUGEPAGE
+	default n
 
 config DAMON_PADDR
 	bool "Data access monitoring operations for the physical address space"

@@ -3,7 +3,7 @@
  * Copyright (C) 2020-2022 Oplus. All rights reserved.
  */
 
-#define pr_fmt(fmt) "[HYBRIDSWAP]" fmt
+#define pr_fmt(fmt) "[HYB_ZRAM]" fmt
 
 #include <uapi/linux/sched/types.h>
 #include <linux/sched.h>
@@ -22,6 +22,13 @@
 #include "../zram_drv.h"
 #include "../zram_drv_internal.h"
 #include "internal.h"
+
+enum scan_balance {
+	SCAN_EQUAL,
+	SCAN_FRACT,
+	SCAN_ANON,
+	SCAN_FILE,
+};
 
 enum swapd_pressure_level {
 	LEVEL_LOW = 0,
@@ -63,25 +70,26 @@ struct hybridswapd_task {
 #define PAGES_TO_MB(pages) ((pages) >> 8)
 #define PAGES_PER_1MB (1 << 8)
 
-unsigned long long global_anon_refault_ratio;
-unsigned long long swapd_skip_interval;
-bool last_round_is_empty;
-unsigned long last_swapd_time;
-struct eventfd_ctx *swapd_press_efd[LEVEL_COUNT];
-atomic64_t zram_wm_ratio = ATOMIC_LONG_INIT(ZRAM_WM_RATIO);
-atomic64_t compress_ratio = ATOMIC_LONG_INIT(COMPRESS_RATIO);
-atomic_t avail_buffers = ATOMIC_INIT(0);
-atomic_t min_avail_buffers = ATOMIC_INIT(0);
-atomic_t high_avail_buffers = ATOMIC_INIT(0);
-atomic_t max_reclaim_size = ATOMIC_INIT(100);
-atomic64_t free_swap_threshold = ATOMIC64_INIT(0);
-atomic64_t zram_crit_thres = ATOMIC_LONG_INIT(0);
-atomic64_t cpuload_threshold = ATOMIC_LONG_INIT(0);
-atomic64_t hs_swap_anon_refault_threshold = ATOMIC_LONG_INIT(HS_SWAP_ANON_REFAULT_THRESHOLD);
-atomic64_t anon_refault_snapshot_min_interval = ATOMIC_LONG_INIT(ANON_REFAULT_SNAPSHOT_MIN_INTERVAL);
-atomic64_t empty_round_skip_interval = ATOMIC_LONG_INIT(EMPTY_ROUND_SKIP_INTERNVAL);
-atomic64_t max_skip_interval = ATOMIC_LONG_INIT(MAX_SKIP_INTERVAL);
-atomic64_t empty_round_check_threshold = ATOMIC_LONG_INIT(EMPTY_ROUND_CHECK_THRESHOLD);
+static unsigned long long global_anon_refault_ratio;
+static unsigned long long swapd_skip_interval;
+static bool last_round_is_empty;
+static unsigned long last_swapd_time;
+static struct eventfd_ctx *swapd_press_efd[LEVEL_COUNT];
+static atomic64_t zram_wm_ratio = ATOMIC_LONG_INIT(ZRAM_WM_RATIO);
+static atomic64_t compress_ratio = ATOMIC_LONG_INIT(COMPRESS_RATIO);
+static atomic_t avail_buffers = ATOMIC_INIT(0);
+static atomic_t min_avail_buffers = ATOMIC_INIT(0);
+static atomic_t high_avail_buffers = ATOMIC_INIT(0);
+static atomic_t max_reclaim_size = ATOMIC_INIT(100);
+static atomic64_t free_swap_threshold = ATOMIC64_INIT(0);
+static atomic64_t zram_crit_thres = ATOMIC_LONG_INIT(0);
+static atomic64_t cpuload_threshold = ATOMIC_LONG_INIT(0);
+static atomic64_t hs_swap_anon_refault_threshold = ATOMIC_LONG_INIT(HS_SWAP_ANON_REFAULT_THRESHOLD);
+static atomic64_t anon_refault_snapshot_min_interval = ATOMIC_LONG_INIT(ANON_REFAULT_SNAPSHOT_MIN_INTERVAL);
+static atomic64_t empty_round_skip_interval = ATOMIC_LONG_INIT(EMPTY_ROUND_SKIP_INTERNVAL);
+static atomic64_t max_skip_interval = ATOMIC_LONG_INIT(MAX_SKIP_INTERVAL);
+static atomic64_t empty_round_check_threshold = ATOMIC_LONG_INIT(EMPTY_ROUND_CHECK_THRESHOLD);
+
 static unsigned long reclaim_exceed_sleep_ms = 50;
 static unsigned long all_totalreserve_pages;
 
@@ -115,76 +123,84 @@ extern unsigned long try_to_free_mem_cgroup_pages(struct mem_cgroup *memcg,
 		unsigned long nr_pages,
 		gfp_t gfp_mask,
 		bool may_swap);
+
+static void wake_all_swapd(void);
+
 #ifdef CONFIG_OPLUS_JANK
 extern u32 get_cpu_load(u32 win_cnt, struct cpumask *mask);
 #endif
 
-inline u64 get_zram_wm_ratio_value(void)
+static inline bool current_is_hybrid_swapd(void)
+{
+	return current->pid == swapd_pid;
+}
+
+static inline u64 get_zram_wm_ratio_value(void)
 {
 	return atomic64_read(&zram_wm_ratio);
 }
 
-inline u64 get_compress_ratio_value(void)
+static inline u64 get_compress_ratio_value(void)
 {
 	return atomic64_read(&compress_ratio);
 }
 
-inline unsigned int get_avail_buffers_value(void)
+static inline unsigned int get_avail_buffers_value(void)
 {
 	return atomic_read(&avail_buffers);
 }
 
-inline unsigned int get_min_avail_buffers_value(void)
+static inline unsigned int get_min_avail_buffers_value(void)
 {
 	return atomic_read(&min_avail_buffers);
 }
 
-inline unsigned int get_high_avail_buffers_value(void)
+static inline unsigned int get_high_avail_buffers_value(void)
 {
 	return atomic_read(&high_avail_buffers);
 }
 
-inline u64 get_swapd_max_reclaim_size(void)
+static inline u64 get_swapd_max_reclaim_size(void)
 {
 	return atomic_read(&max_reclaim_size);
 }
 
-inline u64 get_free_swap_threshold_value(void)
+static inline u64 get_free_swap_threshold_value(void)
 {
 	return atomic64_read(&free_swap_threshold);
 }
 
-inline unsigned long long get_hs_swap_anon_refault_threshold_value(void)
+static inline unsigned long long get_hs_swap_anon_refault_threshold_value(void)
 {
 	return atomic64_read(&hs_swap_anon_refault_threshold);
 }
 
-inline unsigned long get_anon_refault_snapshot_min_interval_value(void)
+static inline unsigned long get_anon_refault_snapshot_min_interval_value(void)
 {
 	return atomic64_read(&anon_refault_snapshot_min_interval);
 }
 
-inline unsigned long long get_empty_round_skip_interval_value(void)
+static inline unsigned long long get_empty_round_skip_interval_value(void)
 {
 	return atomic64_read(&empty_round_skip_interval);
 }
 
-inline unsigned long long get_max_skip_interval_value(void)
+static inline unsigned long long get_max_skip_interval_value(void)
 {
 	return atomic64_read(&max_skip_interval);
 }
 
-inline unsigned long long get_empty_round_check_threshold_value(void)
+static inline unsigned long long get_empty_round_check_threshold_value(void)
 {
 	return atomic64_read(&empty_round_check_threshold);
 }
 
-inline u64 get_zram_critical_threshold_value(void)
+static inline u64 get_zram_critical_threshold_value(void)
 {
 	return atomic64_read(&zram_crit_thres);
 }
 
-inline u64 get_cpuload_threshold_value(void)
+static inline u64 get_cpuload_threshold_value(void)
 {
 	return atomic64_read(&cpuload_threshold);
 }
@@ -823,8 +839,8 @@ static void snapshot_anon_refaults(void)
 /*
  * Return true means skip reclaim.
  */
-bool get_memcg_anon_refault_status(struct mem_cgroup *memcg,
-		pg_data_t *pgdat)
+static bool get_memcg_anon_refault_status(struct mem_cgroup *memcg,
+					  pg_data_t *pgdat)
 {
 	const unsigned int percent_constant = 100;
 	unsigned long long cur_anon_pagefault;
@@ -1054,7 +1070,7 @@ static int swapd_bind_read(struct seq_file *m, void *v)
 	return 0;
 }
 
-struct cftype mem_cgroup_swapd_legacy_files[] = {
+static struct cftype mem_cgroup_swapd_legacy_files[] = {
 	{
 		.name = "active_app_info_list",
 		.flags = CFTYPE_ONLY_ON_ROOT,
@@ -1266,7 +1282,7 @@ static unsigned long zram_same_pages(void)
 /* add extra zram_increase / INC_EXTRA_ZRAM_RATIO to zram, same
  * pages do not occupy physical memory
  * */
-unsigned long get_nr_zram_total(void)
+static unsigned long get_nr_zram_total(void)
 {
 	unsigned long nr_zram = 1;
 
@@ -1280,7 +1296,7 @@ unsigned long get_nr_zram_total(void)
 	return nr_zram ?: 1;
 }
 
-bool zram_watermark_ok(void)
+static bool zram_watermark_ok(void)
 {
 	long long diff_buffers;
 	long long wm = 0;
@@ -1305,7 +1321,7 @@ static inline bool zram_is_full(void)
 	return zram_used_pages() >= get_nr_zram_total();
 }
 
-bool free_zram_is_ok(void)
+static bool basepage_free_zram_is_ok(void)
 {
 	unsigned long nr_used, nr_tot, nr_rsv, same_pages;
 
@@ -1320,7 +1336,6 @@ bool free_zram_is_ok(void)
 
 	return nr_used < (nr_tot - nr_rsv);
 }
-EXPORT_SYMBOL(free_zram_is_ok);
 
 static bool zram_need_swapout(void)
 {
@@ -1341,7 +1356,7 @@ static bool zram_need_swapout(void)
 	return false;
 }
 
-bool zram_watermark_exceed(void)
+static bool zram_watermark_exceed(void)
 {
 	u64 nr_zram_used;
 	u64 nr_wm = get_zram_critical_threshold_value();
@@ -1421,7 +1436,7 @@ static void wakeup_swapd(pg_data_t *pgdat)
 	wake_up_interruptible(&hyb_task->swapd_wait);
 }
 
-void wake_all_swapd(void)
+static void wake_all_swapd(void)
 {
 	pg_data_t *pgdat = NULL;
 	int nid;
@@ -1432,7 +1447,7 @@ void wake_all_swapd(void)
 	}
 }
 
-bool free_swap_is_low(void)
+static bool free_swap_is_low(void)
 {
 	struct sysinfo info;
 
@@ -1440,7 +1455,6 @@ bool free_swap_is_low(void)
 
 	return (info.freeswap < get_free_swap_threshold_value());
 }
-EXPORT_SYMBOL(free_swap_is_low);
 
 static inline u64 __calc_nr_to_reclaim(void)
 {
@@ -1721,7 +1735,7 @@ do_eswap:
 /*
  * This swapd start function will be called by init and node-hot-add.
  */
-int swapd_run(int nid)
+static int swapd_run(int nid)
 {
 	pg_data_t *pgdat = NODE_DATA(nid);
 	struct sched_param param = {
@@ -1753,7 +1767,7 @@ int swapd_run(int nid)
  * Called by memory hotplug when all memory in a node is offlined.  Caller must
  * hold mem_hotplug_begin/end().
  */
-void swapd_stop(int nid)
+static void swapd_stop(int nid)
 {
 	struct pglist_data *pgdata = NODE_DATA(nid);
 	struct task_struct *swapd;
@@ -1813,16 +1827,28 @@ static int swapd_cpu_online(unsigned int cpu)
 	return 0;
 }
 
-void alloc_pages_slowpath_hook(void *data, gfp_t gfp_flags,
-		unsigned int order, unsigned long delta)
+static void vh_tune_scan_type(void *data, char *scan_balance)
 {
-	if (gfp_flags & __GFP_KSWAPD_RECLAIM)
-		wake_all_swapd();
+	if (current_is_hybrid_swapd()) {
+		*scan_balance = SCAN_ANON;
+		return;
+	}
+
+#ifdef CONFIG_HYBRIDSWAP_CORE
+	if (unlikely(!hybridswap_core_enabled()))
+		return;
+
+	/*real zram full, scan file only*/
+	if (!basepage_free_zram_is_ok()) {
+		*scan_balance = SCAN_FILE;
+		return;
+	}
+#endif
 }
 
-void rmqueue_hook(void *data, struct zone *preferred_zone,
-		struct zone *zone, unsigned int order, gfp_t gfp_flags,
-		unsigned int alloc_flags, int migratetype)
+static void vh_rmqueue(void *data, struct zone *preferred_zone,
+		       struct zone *zone, unsigned int order, gfp_t gfp_flags,
+		       unsigned int alloc_flags, int migratetype)
 {
 	if (gfp_flags & __GFP_KSWAPD_RECLAIM)
 		wake_all_swapd();
@@ -1902,31 +1928,6 @@ static void destroy_swapd_thread(void)
 	}
 }
 
-ssize_t hybridswap_swapd_pause_store(struct device *dev,
-		struct device_attribute *attr, const char *buf, size_t len)
-{
-	char *type_buf = NULL;
-	bool val;
-
-	type_buf = strstrip((char *)buf);
-	if (kstrtobool(type_buf, &val))
-		return -EINVAL;
-	atomic_set(&swapd_pause, val);
-
-	return len;
-}
-
-ssize_t hybridswap_swapd_pause_show(struct device *dev,
-		struct device_attribute *attr, char *buf)
-{
-	ssize_t size = 0;
-
-	size += scnprintf(buf + size, PAGE_SIZE - size,
-			"%d\n", atomic_read(&swapd_pause));
-
-	return size;
-}
-
 #if IS_ENABLED(CONFIG_DRM_MSM) || IS_ENABLED(CONFIG_DRM_OPLUS_NOTIFY)
 static int bright_fb_notifier_callback(struct notifier_block *self,
 		unsigned long event, void *data)
@@ -1947,17 +1948,17 @@ static int bright_fb_notifier_callback(struct notifier_block *self,
 }
 #endif
 
-void __init swapd_pre_init(void)
+void swapd_pre_init(void)
 {
 	all_totalreserve_pages = get_totalreserve_pages();
 }
 
-void swapd_pre_deinit(void)
+static void swapd_pre_deinit(void)
 {
 	all_totalreserve_pages = 0;
 }
 
-int swapd_init(struct zram *zram)
+static int swapd_init(struct zram **zram)
 {
 	int ret;
 
@@ -1982,13 +1983,13 @@ int swapd_init(struct zram *zram)
 		goto snapshotd_fail;
 	}
 
-	ret = create_swapd_thread(zram);
+	swapd_zram = zram_arr[ZRAM_TYPE_BASEPAGE];
+	ret = create_swapd_thread(swapd_zram);
 	if (ret) {
 		log_err("create_swapd_thread failed, ret=%d\n", ret);
 		goto create_swapd_fail;
 	}
 
-	swapd_zram = zram;
 	atomic_set(&swapd_enabled, 1);
 	return 0;
 
@@ -2003,7 +2004,7 @@ msm_drm_register_fail:
 	return ret;
 }
 
-void swapd_exit(void)
+static void swapd_exit(void)
 {
 	destroy_swapd_thread();
 	snapshotd_exit();
@@ -2014,7 +2015,32 @@ void swapd_exit(void)
 	atomic_set(&swapd_enabled, 0);
 }
 
-bool hybridswap_swapd_enabled(void)
+static bool hybridswap_swapd_enabled(void)
 {
 	return !!atomic_read(&swapd_enabled);
+}
+
+void hybridswapd_ops_init(struct hybridswapd_operations *ops)
+{
+	ops->fault_out_pause = &fault_out_pause;
+	ops->fault_out_pause_cnt = &fault_out_pause_cnt;
+	ops->swapd_pause = &swapd_pause;
+
+	ops->memcg_legacy_files = mem_cgroup_swapd_legacy_files;
+	ops->update_memcg_param = update_swapd_memcg_param;
+
+	ops->pre_init = swapd_pre_init;
+	ops->pre_deinit = swapd_pre_deinit;
+
+	ops->init = swapd_init;
+	ops->deinit = swapd_exit;
+	ops->enabled = hybridswap_swapd_enabled;
+
+	ops->free_zram_is_ok = basepage_free_zram_is_ok;
+	ops->zram_watermark_ok = zram_watermark_ok;
+	ops->zram_total_pages = get_nr_zram_total;
+	ops->wakeup_kthreads = wake_all_swapd;
+
+	ops->vh_rmqueue = vh_rmqueue;
+	ops->vh_tune_scan_type = vh_tune_scan_type;
 }

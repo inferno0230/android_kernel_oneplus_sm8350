@@ -40,4 +40,4 @@ obj-y	+= task_cpustats/
 obj-$(CONFIG_OPLUS_HEALTHINFO)	+= healthinfo/
 #endif /* OPLUS_FEATURE_HEALTHINFO */
 
-obj-$(CONFIG_OPLUS_FEATURE_CPU_JANKINFO)	+= cpu_jankinfo/
+obj-$(CONFIG_OPLUS_FEATURE_CPU_JANKINFO)	+= sched_info/

@@ -44,7 +44,7 @@
 #endif
 
 #if IS_ENABLED(CONFIG_OPLUS_FEATURE_CPU_JANKINFO)
-#include <linux/cpu_jankinfo/jank_freq.h>
+#include <linux/sched_info/osi_freq.h>
 #endif
 
 static LIST_HEAD(cpufreq_policy_list);
@@ -571,7 +571,6 @@ unsigned int cpufreq_driver_resolve_freq(struct cpufreq_policy *policy,
 	jankinfo_update_freq_reach_limit_count(policy,
 					old_target_freq, target_freq, DO_CLAMP);
 #endif
-
 	policy->cached_target_freq = target_freq;
 
 	if (cpufreq_driver->target_index) {
@@ -1271,6 +1270,7 @@ static struct cpufreq_policy *cpufreq_policy_alloc(unsigned int cpu)
 	if (!zalloc_cpumask_var(&policy->real_cpus, GFP_KERNEL))
 		goto err_free_rcpumask;
 
+	init_completion(&policy->kobj_unregister);
 	ret = kobject_init_and_add(&policy->kobj, &ktype_cpufreq,
 				   cpufreq_global_kobject, "policy%u", cpu);
 	if (ret) {
@@ -1309,7 +1309,6 @@ static struct cpufreq_policy *cpufreq_policy_alloc(unsigned int cpu)
 	init_rwsem(&policy->rwsem);
 	spin_lock_init(&policy->transition_lock);
 	init_waitqueue_head(&policy->transition_wait);
-	init_completion(&policy->kobj_unregister);
 	INIT_WORK(&policy->update, handle_update);
 
 	policy->cpu = cpu;

@@ -137,4 +137,5 @@ extern void add_to_oom_reaper(struct task_struct *p);
 extern void check_panic_on_foreground_kill(struct task_struct *p);
 #define ULMK_MAGIC "lmkd"
 #define ATHENA_KILLER_MAGIC "athena_killer"
+#define PRE_KILL "PreKillActionT"
 #endif /* _INCLUDE_LINUX_OOM_H */

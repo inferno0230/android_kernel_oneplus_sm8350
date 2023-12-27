@@ -5,7 +5,7 @@
 
 #ifndef HYBRIDSWAP_H
 #define HYBRIDSWAP_H
-extern int __init hybridswap_pre_init(void);
+extern int hybridswap_pre_init(void);
 extern ssize_t hybridswap_vmstat_show(struct device *dev,
 		struct device_attribute *attr, char *buf);
 extern ssize_t hybridswap_loglevel_store(struct device *dev,
@@ -51,17 +51,11 @@ extern ssize_t hybridswap_zram_increase_show(struct device *dev,
 #endif
 
 #ifdef CONFIG_HYBRIDSWAP_SWAPD
-extern ssize_t hybridswap_swapd_pause_store(struct device *dev,
-		struct device_attribute *attr, const char *buf, size_t len);
 extern ssize_t hybridswap_swapd_pause_show(struct device *dev,
-		struct device_attribute *attr, char *buf);
+					   struct device_attribute *attr,
+					   char *buf);
+extern ssize_t hybridswap_swapd_pause_store(struct device *dev,
+					    struct device_attribute *attr,
+					    const char *buf, size_t len);
 #endif
-static inline bool current_is_swapd(void)
-{
-#ifdef CONFIG_HYBRIDSWAP_SWAPD
-	return (strncmp(current->comm, "hybridswapd:", sizeof("hybridswapd:") - 1) == 0);
-#else
-	return false;
-#endif
-}
 #endif /* HYBRIDSWAP_H */

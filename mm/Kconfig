@@ -939,12 +939,52 @@ config KSHRINK_SLABD
 	help
 	  enable async shrink_lruvecd
 
+config OPLUS_SENSITIVE_MEM_ALLOC_OPT
+        bool "enable oplus sensitive mem alloc opt"
+        default n
+        help
+          enable oplus sensitive mem alloc opt
+
+config OPLUS_UXMEM_OPT
+        bool "enable uxmem_opt"
+        depends on OPLUS_FEATURE_SCHED_ASSIST && FG_TASK_UID
+        default n
+        help
+          enable uxmem_opt
 
 config DYNAMIC_TUNNING_SWAPPINESS
 	bool "tunning swappiess depends on file_pages size"
 	default n
 	help
 	  tunning swappiess depends on file_pages size
+
+config CONT_PTE_HUGEPAGE
+	bool "Cont Pte Hugepage support"
+	select TRANSPARENT_HUGEPAGE
+	default n
+	help
+	  Try to THP-like Hugepages based on ARM64 cont-pte.
+
+config CONT_PTE_HUGEPAGE_ON_EXT4
+	bool "Cont Pte Hugepage support on EXT4"
+	default n
+	depends on CONT_PTE_HUGEPAGE
+	help
+	  Try to THP-like Hugepages based on ARM64 cont-pte on ext4
+
+config CONT_PTE_HUGEPAGE_ON_QEMU
+	bool "Cont Pte Hugepage support on QEMU"
+	default n
+	depends on CONT_PTE_HUGEPAGE
+	help
+	  QEMU debugging of ContPte hugepage
+
+config CONT_PTE_HUGEPAGE_64K_ZRAM
+	bool "Cont Pte Hugepage support 64K ZRAM"
+	default y
+	depends on CONT_PTE_HUGEPAGE
+	help
+	  Cont Pte Hugepage support 64K ZRAM
 
 source "mm/zram_opt/Kconfig"
 source "mm/process_reclaim/Kconfig"
@@ -954,6 +994,13 @@ source "mm/healthinfo/Kconfig"
 source "mm/malloc_track/Kconfig"
 source "mm/task_mem/Kconfig"
 source "mm/mm_osvelte/Kconfig"
+
+config PROACTIVE_COMPACT
+	tristate "trigger memory compact based on fragmentation index"
+	default n
+	help
+	  trigger memory compact based on fragmentation index
+
 config MAPPED_PROTECT
 	bool "mapped protect"
 	default n
@@ -964,3 +1011,10 @@ config LOOK_AROUND
 	default n
 	help
 	  look aroud pages when rmap lru page
+config OPLUS_DYNAMIC_READAHEAD
+	bool "dynamic page fault read-ahead size"
+	depends on OPLUS_FEATURE_SCHED_ASSIST && FG_TASK_UID
+	default n
+	help
+	  This feature dynamically set read-ahead size for performance.
+

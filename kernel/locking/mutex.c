@@ -45,6 +45,11 @@
 #ifdef CONFIG_LOCKING_PROTECT
 #include <linux/sched_assist/sched_assist_locking.h>
 #endif
+
+#if IS_ENABLED(CONFIG_OPLUS_LOCKING_STRATEGY)
+#include <linux/sched_assist/sync/mutex.h>
+#endif
+
 void
 __mutex_init(struct mutex *lock, const char *name, struct lock_class_key *key)
 {
@@ -54,9 +59,9 @@ __mutex_init(struct mutex *lock, const char *name, struct lock_class_key *key)
 #ifdef CONFIG_MUTEX_SPIN_ON_OWNER
 	osq_lock_init(&lock->osq);
 #endif
-#if defined(OPLUS_FEATURE_SCHED_ASSIST) && defined(CONFIG_OPLUS_FEATURE_SCHED_ASSIST)
+#if IS_ENABLED(CONFIG_OPLUS_LOCKING_STRATEGY)
 	lock->ux_dep_task = NULL;
-#endif /* defined(OPLUS_FEATURE_SCHED_ASSIST) && defined(CONFIG_OPLUS_FEATURE_SCHED_ASSIST) */
+#endif
 
 	debug_mutex_init(lock, name, key);
 }
@@ -220,17 +225,22 @@ static void
 __mutex_add_waiter(struct mutex *lock, struct mutex_waiter *waiter,
 		   struct list_head *list)
 {
+#if IS_ENABLED(CONFIG_OPLUS_LOCKING_STRATEGY)
+	bool already_on_list = false;
+#endif
 	debug_mutex_add_waiter(lock, waiter, current);
 
-#if defined(OPLUS_FEATURE_SCHED_ASSIST) && defined(CONFIG_OPLUS_FEATURE_SCHED_ASSIST)
+#if IS_ENABLED(CONFIG_OPLUS_LOCKING_STRATEGY)
 	if (sysctl_sched_assist_enabled) {
 		mutex_list_add(current, &waiter->list, list, lock);
-	} else {
-		list_add_tail(&waiter->list, list);
+		already_on_list = true;
 	}
-#else /* defined(OPLUS_FEATURE_SCHED_ASSIST) && defined(CONFIG_OPLUS_FEATURE_SCHED_ASSIST) */
+	locking_vh_alter_mutex_list_add(lock, waiter, list, &already_on_list);
+	if (!already_on_list)
+		list_add_tail(&waiter->list, list);
+#else
 	list_add_tail(&waiter->list, list);
-#endif /* defined(OPLUS_FEATURE_SCHED_ASSIST) && defined(CONFIG_OPLUS_FEATURE_SCHED_ASSIST) */
+#endif
 	if (__mutex_waiter_is_first(lock, waiter))
 		__mutex_set_flag(lock, MUTEX_FLAG_WAITERS);
 }
@@ -584,9 +594,20 @@ bool mutex_spin_on_owner(struct mutex *lock, struct task_struct *owner,
 			 struct ww_acquire_ctx *ww_ctx, struct mutex_waiter *waiter)
 {
 	bool ret = true;
+#ifdef CONFIG_OPLUS_LOCKING_OSQ
+	int cnt = 0;
+	bool time_out = false;
+#endif
 
 	rcu_read_lock();
 	while (__mutex_owner(lock) == owner) {
+#ifdef CONFIG_OPLUS_LOCKING_OSQ
+		locking_vh_mutex_opt_spin_start(lock, &time_out, &cnt);
+		if (time_out) {
+  			ret = false;
+			break;
+		}
+#endif
 		/*
 		 * Ensure we emit the owner->on_cpu, dereference _after_
 		 * checking lock->owner still matches owner. If that fails,
@@ -637,7 +658,9 @@ static inline int mutex_can_spin_on_owner(struct mutex *lock)
 	if (owner)
 		retval = owner->on_cpu && !vcpu_is_preempted(task_cpu(owner));
 	rcu_read_unlock();
-
+#ifdef CONFIG_OPLUS_LOCKING_OSQ
+	locking_vh_mutex_can_spin_on_owner(lock, &retval);
+#endif
 	/*
 	 * If lock->owner is not set, the mutex has been released. Return true
 	 * such that we'll trylock in the spin path, which is a faster option
@@ -717,7 +740,9 @@ mutex_optimistic_spin(struct mutex *lock, struct ww_acquire_ctx *ww_ctx,
 
 	if (!waiter)
 		osq_unlock(&lock->osq);
-
+#ifdef CONFIG_OPLUS_LOCKING_OSQ
+	locking_vh_mutex_opt_spin_finish(lock, true);
+#endif
 	return true;
 
 
@@ -726,6 +751,9 @@ fail_unlock:
 		osq_unlock(&lock->osq);
 
 fail:
+#ifdef CONFIG_OPLUS_LOCKING_OSQ
+	locking_vh_mutex_opt_spin_finish(lock, false);
+#endif
 	/*
 	 * If we fell out of the spin path because of need_resched(),
 	 * reschedule now, before we try-lock the mutex. This avoids getting
@@ -1039,8 +1067,13 @@ __mutex_lock_common(struct mutex *lock, long state, unsigned int subclass,
 	}
 
 	waiter.task = current;
-
+#if IS_ENABLED(CONFIG_OPLUS_LOCKING_STRATEGY)
+	locking_vh_mutex_wait_start(lock);
+#endif
 	trace_android_vh_mutex_wait_start(lock);
+#ifdef CONFIG_LOCKING_PROTECT
+	update_locking_time(jiffies, false);
+#endif
 	set_current_state(state);
 	for (;;) {
 		bool first;
@@ -1074,11 +1107,11 @@ __mutex_lock_common(struct mutex *lock, long state, unsigned int subclass,
 			if (ret)
 				goto err;
 		}
-#if defined(OPLUS_FEATURE_SCHED_ASSIST) && defined(CONFIG_OPLUS_FEATURE_SCHED_ASSIST)
+#if IS_ENABLED(CONFIG_OPLUS_LOCKING_STRATEGY)
 		if (sysctl_sched_assist_enabled) {
 			mutex_set_inherit_ux(lock, current);
 		}
-#endif /* defined(OPLUS_FEATURE_SCHED_ASSIST) && defined(CONFIG_OPLUS_FEATURE_SCHED_ASSIST) */
+#endif
 
 		spin_unlock(&lock->wait_lock);
 #ifdef OPLUS_FEATURE_HEALTHINFO
@@ -1116,6 +1149,9 @@ __mutex_lock_common(struct mutex *lock, long state, unsigned int subclass,
 	spin_lock(&lock->wait_lock);
 acquired:
 	__set_current_state(TASK_RUNNING);
+#if IS_ENABLED(CONFIG_OPLUS_LOCKING_STRATEGY)
+	locking_vh_mutex_wait_finish(lock);
+#endif
 	trace_android_vh_mutex_wait_finish(lock);
 
 	if (ww_ctx) {
@@ -1145,6 +1181,9 @@ skip_wait:
 
 err:
 	__set_current_state(TASK_RUNNING);
+#if IS_ENABLED(CONFIG_OPLUS_LOCKING_STRATEGY)
+	locking_vh_mutex_wait_finish(lock);
+#endif
 	trace_android_vh_mutex_wait_finish(lock);
 	__mutex_remove_waiter(lock, &waiter);
 err_early_kill:
@@ -1337,14 +1376,8 @@ static noinline void __sched __mutex_unlock_slowpath(struct mutex *lock, unsigne
 
 		owner = old;
 	}
-
 	spin_lock(&lock->wait_lock);
 	debug_mutex_unlock(lock);
-#if defined(OPLUS_FEATURE_SCHED_ASSIST) && defined(CONFIG_OPLUS_FEATURE_SCHED_ASSIST)
-	if (sysctl_sched_assist_enabled) {
-		mutex_unset_inherit_ux(lock, current);
-	}
-#endif /* defined(OPLUS_FEATURE_SCHED_ASSIST) && defined(CONFIG_OPLUS_FEATURE_SCHED_ASSIST) */
 	if (!list_empty(&lock->wait_list)) {
 		/* get the first entry from the wait-list: */
 		struct mutex_waiter *waiter =
@@ -1359,10 +1392,14 @@ static noinline void __sched __mutex_unlock_slowpath(struct mutex *lock, unsigne
 
 	if (owner & MUTEX_FLAG_HANDOFF)
 		__mutex_handoff(lock, next);
-
 	spin_unlock(&lock->wait_lock);
 
 	wake_up_q(&wake_q);
+#if IS_ENABLED(CONFIG_OPLUS_LOCKING_STRATEGY)
+	if (sysctl_sched_assist_enabled) {
+		mutex_unset_inherit_ux(lock, current);
+	}
+#endif
 }
 
 #ifndef CONFIG_DEBUG_LOCK_ALLOC

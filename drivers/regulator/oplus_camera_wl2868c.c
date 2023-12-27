@@ -214,7 +214,7 @@ int wl2868c_set_ldo_value(EXT_SELECT ldonum,unsigned int value)
     }
 
     WL2868C_PRINT("[wl2868c] ldo_id=%d ldo=%d,value=%d,Ldo_out:%d,regaddr=0x%x\n",ldo_id, ldonum, value, Ldo_out, regaddr);
-
+    wl2868c_i2c_client->addr =  which_ldo_chip[ldo_id].i2c_addr;
     ret = i2c_smbus_write_byte_data(wl2868c_i2c_client, regaddr, Ldo_out);
     if (ret < 0) {
         goto out;

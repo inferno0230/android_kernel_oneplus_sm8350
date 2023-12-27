@@ -807,6 +807,8 @@ isolate_migratepages_block(struct compact_control *cc, unsigned long low_pfn,
 		if (cc->mode == MIGRATE_ASYNC)
 			return 0;
 
+		pr_warn("%s %d : too many isolated\n",__func__,__LINE__);
+		show_mem(0, NULL);
 		congestion_wait(BLK_RW_ASYNC, HZ/10);
 
 		if (fatal_signal_pending(current))
@@ -979,7 +981,12 @@ isolate_migratepages_block(struct compact_control *cc, unsigned long low_pfn,
 			}
 		}
 
-		lruvec = mem_cgroup_page_lruvec(page, pgdat);
+#if defined(CONFIG_CONT_PTE_HUGEPAGE) && CONFIG_CONT_PTE_HUGEPAGE_LRU
+		if (ContPteCMAHugePageHead(page))
+			lruvec = mem_cgroup_chp_page_lruvec(page, pgdat);
+		else
+#endif
+			lruvec = mem_cgroup_page_lruvec(page, pgdat);
 
 		/* Try isolate the page */
 		if (__isolate_lru_page(page, isolate_mode) != 0)
@@ -1223,7 +1230,7 @@ move_freelist_tail(struct list_head *freelist, struct page *freepage)
 }
 
 static void
-fast_isolate_around(struct compact_control *cc, unsigned long pfn, unsigned long nr_isolated)
+fast_isolate_around(struct compact_control *cc, unsigned long pfn)
 {
 	unsigned long start_pfn, end_pfn;
 	struct page *page = pfn_to_page(pfn);
@@ -1240,21 +1247,13 @@ fast_isolate_around(struct compact_control *cc, unsigned long pfn, unsigned long
 	start_pfn = pageblock_start_pfn(pfn);
 	end_pfn = min(pageblock_end_pfn(pfn), zone_end_pfn(cc->zone)) - 1;
 
-	/* Scan before */
-	if (start_pfn != pfn) {
-		isolate_freepages_block(cc, &start_pfn, pfn, &cc->freepages, 1, false);
-		if (cc->nr_freepages >= cc->nr_migratepages)
-			return;
-	}
-
-	/* Scan after */
-	start_pfn = pfn + nr_isolated;
-	if (start_pfn < end_pfn)
-		isolate_freepages_block(cc, &start_pfn, end_pfn, &cc->freepages, 1, false);
+	isolate_freepages_block(cc, &start_pfn, end_pfn, &cc->freepages, 1, false);
 
 	/* Skip this pageblock in the future as it's full or nearly full */
 	if (cc->nr_freepages < cc->nr_migratepages)
 		set_pageblock_skip(page);
+
+	return;
 }
 
 /* Search orders in round-robin fashion */
@@ -1444,7 +1443,7 @@ fast_isolate_freepages(struct compact_control *cc)
 		return cc->free_pfn;
 
 	low_pfn = page_to_pfn(page);
-	fast_isolate_around(cc, low_pfn, nr_isolated);
+	fast_isolate_around(cc, low_pfn);
 	return low_pfn;
 }
 
@@ -1983,7 +1982,9 @@ static enum compact_result __compact_finished(struct compact_control *cc)
 #if defined(CONFIG_PHYSICAL_ANTI_FRAGMENTATION)
     }
 #endif
-	if (cc->contended || fatal_signal_pending(current))
+	if (cc->contended || fatal_signal_pending(current) ||
+		(signal_pending(current) &&
+		 sigismember(&current->pending.signal, SIGUSR2)))
 		ret = COMPACT_CONTENDED;
 
 	return ret;

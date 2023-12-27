@@ -738,7 +738,6 @@ int a6xx_preemption_init(struct adreno_device *adreno_dev)
 	 * KMD postamble pm4 packets. This should be in *device->scratch* so that userspace
 	 * cannot access it.
 	 */
-
 	if (!adreno_dev->perfcounter) {
 		u32 *postamble = device->scratch->hostptr + SCRATCH_POSTAMBLE_OFFSET;
 		u32 count = 0;

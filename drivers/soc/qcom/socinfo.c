@@ -189,6 +189,9 @@ static struct socinfo {
 #define SMEM_IMAGE_VERSION_OEM_OFFSET 95
 #define SMEM_IMAGE_VERSION_PARTITION_APPS 10
 
+int softsku_idx;
+module_param_named(softsku_idx, softsku_idx, int, 0644);
+
 /* Version 2 */
 static uint32_t socinfo_get_raw_id(void)
 {
@@ -627,6 +630,7 @@ struct soc_id {
 static char *fake_soc_id_name = "SM8150";
 static char *real_soc_id_name = "SM8350";
 static char *real_soc_id_21075_21031 = "SDM778G";
+static char *real_soc_id_ziti = "SDM782G";
 #endif
 
 static const struct soc_id soc_id[] = {
@@ -696,6 +700,8 @@ static const struct soc_id soc_id[] = {
 	{ 498, "YUPIKP-IOT" },
 	{ 499, "YUPIKP" },
 	{ 515, "YUPIK-LTE" },
+	{ 575, "KATMAI" },
+	{ 576, "KATMAIP" },
 };
 
 static struct qcom_socinfo *qsocinfo;
@@ -1220,9 +1226,13 @@ static const char *socinfo_machine(unsigned int id)
             if (is_confidential()) {
                 return fake_soc_id_name;
             } else {
-		if (get_project() == 21075 || get_project() == 21031 || get_project() == 22831 || get_project() == 22055) {
+		if (get_project() == 21075 || get_project() == 21031 || get_project() == 22831 || get_project() == 22055
+				|| get_project() == 22101 || get_project() == 22235 || get_project() == 22236) {
 			return real_soc_id_21075_21031;
-		} else {
+		} else if (get_project() == 22813 || get_project() == 22867) {
+			return real_soc_id_ziti;
+
+                } else {
 			return real_soc_id_name;
 		}
             }

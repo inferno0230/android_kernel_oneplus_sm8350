@@ -24,6 +24,10 @@
 #include <uapi/linux/sched/types.h>
 #include <../../../../../kernel/sched/sched.h>
 
+#if defined(CONFIG_OPLUS_HEALTHINFO) && defined(CONFIG_OPLUS_ION_BOOSTPOOL)
+#include <linux/healthinfo/ion.h>
+#endif
+
 #include <linux/msm_ion.h>
 #include "ion_msm_page_pool.h"
 #include "ion_msm_system_heap.h"
@@ -33,9 +37,128 @@
 #define MAX_BOOST_POOL_HIGH (1024 * 256)
 #define K(x) ((x) << (PAGE_SHIFT - 10))
 #define M(x) (K(x) >> 10)
+#define PAGES(x) (x >> PAGE_SHIFT)
 
 static bool boost_pool_enable = true;
 static void kcrit_scene_wakeup_lmkd(void);
+static void boost_ion_page_pool_add(struct ion_msm_page_pool *pool,
+				  struct page *page)
+{
+	mutex_lock(&pool->mutex);
+#ifdef OPLUS_FEATURE_HEALTHINFO
+#ifdef CONFIG_OPLUS_HEALTHINFO
+	zone_page_state_add(1L << pool->order, page_zone(page),
+		NR_IONCACHE_PAGES);
+#endif
+#endif  /* OPLUS_FEATURE_HEALTHINFO */
+	if (PageHighMem(page)) {
+		list_add_tail(&page->lru, &pool->high_items);
+		pool->high_count++;
+	} else {
+		list_add_tail(&page->lru, &pool->low_items);
+		pool->low_count++;
+	}
+
+/*	mod_node_page_state(page_pgdat(page), NR_KERNEL_MISC_RECLAIMABLE,
+			    (1 << pool->order));*/
+	atomic_inc(&pool->count);
+#if defined(CONFIG_OPLUS_HEALTHINFO) && defined(CONFIG_OPLUS_ION_BOOSTPOOL)
+	atomic64_add(1 << pool->order, &boost_pool_pages);
+#endif
+	mutex_unlock(&pool->mutex);
+}
+
+static struct page *boost_ion_page_pool_remove(struct ion_msm_page_pool *pool,
+					     bool high)
+{
+	struct page *page;
+
+	if (high) {
+		BUG_ON(!pool->high_count);
+		page = list_first_entry(&pool->high_items, struct page, lru);
+		pool->high_count--;
+	} else {
+		BUG_ON(!pool->low_count);
+		page = list_first_entry(&pool->low_items, struct page, lru);
+		pool->low_count--;
+	}
+
+#ifdef OPLUS_FEATURE_HEALTHINFO
+#ifdef CONFIG_OPLUS_HEALTHINFO
+	zone_page_state_add(-(1L << pool->order), page_zone(page),
+			NR_IONCACHE_PAGES);
+#endif
+#endif /* OPLUS_FEATURE_HEALTHINFO */
+	atomic_dec(&pool->count);
+	list_del(&page->lru);
+#if defined(CONFIG_OPLUS_HEALTHINFO) && defined(CONFIG_OPLUS_ION_BOOSTPOOL)
+	atomic64_sub(1 << pool->order, &boost_pool_pages);
+#endif
+	return page;
+}
+
+struct page *boost_ion_page_pool_alloc(struct ion_msm_page_pool *pool,
+				     bool *from_pool)
+{
+	struct page *page = NULL;
+
+	BUG_ON(!pool);
+
+	if (fatal_signal_pending(current))
+		return ERR_PTR(-EINTR);
+
+	if (pool->boost_flag) {
+		mutex_lock(&pool->mutex);
+		if (pool->high_count)
+			page = boost_ion_page_pool_remove(pool, true);
+		else if (pool->low_count)
+			page = boost_ion_page_pool_remove(pool, false);
+		mutex_unlock(&pool->mutex);
+	}
+
+	if (!page)
+		return ERR_PTR(-ENOMEM);
+	return page;
+}
+
+void boost_ion_page_pool_free(struct ion_msm_page_pool *pool, struct page *page)
+{
+	boost_ion_page_pool_add(pool, page);
+}
+
+int boost_ion_page_pool_shrink(struct ion_msm_page_pool *pool, gfp_t gfp_mask,
+			     int nr_to_scan)
+{
+	int freed = 0;
+	bool high;
+
+	if (current_is_kswapd())
+		high = true;
+	else
+		high = !!(gfp_mask & __GFP_HIGHMEM);
+
+	if (nr_to_scan == 0)
+		return ion_msm_page_pool_total(pool, high);
+
+	while (freed < nr_to_scan) {
+		struct page *page;
+
+		mutex_lock(&pool->mutex);
+		if (pool->low_count) {
+			page = boost_ion_page_pool_remove(pool, false);
+		} else if (high && pool->high_count) {
+			page = boost_ion_page_pool_remove(pool, true);
+		} else {
+			mutex_unlock(&pool->mutex);
+			break;
+		}
+		mutex_unlock(&pool->mutex);
+		__free_pages(page, pool->order);
+		freed += (1 << pool->order);
+	}
+
+	return freed;
+}
 
 static inline unsigned int order_to_size(int order)
 {
@@ -86,7 +209,7 @@ static int fill_boost_page_pool(struct ion_msm_page_pool *pool)
 				  PAGE_SIZE << pool->order,
 				  DMA_BIDIRECTIONAL);
 
-	ion_msm_page_pool_free(pool, page);
+	boost_ion_page_pool_free(pool, page);
 
 	return 0;
 }
@@ -228,6 +351,8 @@ struct page_info *boost_pool_allocate(struct ion_boost_pool *pool,
 		pr_err("%s: pool is NULL!\n", __func__);
 		return NULL;
 	}
+	if (pool->camera_pid && current->tgid != pool->camera_pid)
+		return NULL;
 
 	info = kmalloc(sizeof(*info), GFP_KERNEL);
 	if (!info)
@@ -238,7 +363,7 @@ struct page_info *boost_pool_allocate(struct ion_boost_pool *pool,
 		if (max_order < orders[i])
 			continue;
 
-		page = ion_msm_page_pool_alloc(pool->pools[i], &from_pool);
+		page = boost_ion_page_pool_alloc(pool->pools[i], &from_pool);
 		if (IS_ERR(page))
 			continue;
 
@@ -283,7 +408,7 @@ static void boost_pool_all_free(struct ion_boost_pool *pool, gfp_t gfp_mask,
 	}
 
 	for (i = 0; i < NUM_ORDERS; i++)
-		ion_msm_page_pool_shrink(pool->pools[i], gfp_mask, nr_to_scan);
+		boost_ion_page_pool_shrink(pool->pools[i], gfp_mask, nr_to_scan);
 }
 
 int boost_pool_free(struct ion_boost_pool *pool, struct page *page,
@@ -304,12 +429,11 @@ int boost_pool_free(struct ion_boost_pool *pool, struct page *page,
 		return -EPERM;
 	}
 
-	if (boost_pool_nr_pages(pool) < pool->low + (SZ_128M >> PAGE_SHIFT)) {
-		ion_msm_page_pool_free(pool->pools[order_to_index(order)], page);
-		return 0;
-	}
+	if (boost_pool_nr_pages(pool) > pool->low)
+		return -EPERM;
 
-	return -EPERM;
+	boost_ion_page_pool_free(pool->pools[order_to_index(order)], page);
+	return 0;
 }
 
 int boost_pool_shrink(struct ion_boost_pool *boost_pool,
@@ -330,7 +454,7 @@ int boost_pool_shrink(struct ion_boost_pool *boost_pool,
 		return 0;
 
 	if (nr_to_scan == 0)
-		return ion_msm_page_pool_shrink(pool, gfp_mask, 0);
+		return boost_ion_page_pool_shrink(pool, gfp_mask, 0);
 
 	nr_max_free = boost_pool_nr_pages(boost_pool) -
 		(boost_pool->high + LOWORDER_WATER_MASK);
@@ -339,7 +463,7 @@ int boost_pool_shrink(struct ion_boost_pool *boost_pool,
 	if (nr_to_free <= 0)
 		return 0;
 
-	nr_total = ion_msm_page_pool_shrink(pool, gfp_mask, nr_to_free);
+	nr_total = boost_ion_page_pool_shrink(pool, gfp_mask, nr_to_free);
 	return nr_total;
 }
 
@@ -501,7 +625,9 @@ static ssize_t boost_pool_low_proc_write(struct file *file,
 	if (nr_pages <= 0 || nr_pages >= MAX_BOOST_POOL_HIGH)
 		return -EINVAL;
 
-	boost_pool->low = boost_pool->high = nr_pages;
+	boost_pool->camera_low = MAX_BOOST_POOL_HIGH;
+	boost_pool->origin = boost_pool->high = boost_pool->low = nr_pages;
+	boost_pool_wakeup_process(boost_pool);
 
 	return count;
 }
@@ -536,6 +662,63 @@ static const struct file_operations boost_pool_stat_proc_ops = {
 	.owner          = THIS_MODULE,
 	.open           = boost_pool_stat_proc_open,
 	.read           = seq_read,
+	.llseek         = seq_lseek,
+	.release        = single_release,
+};
+
+static int camera_pid_show(struct seq_file *s, void *unused)
+{
+	struct ion_boost_pool *boost_pool = s->private;
+
+	seq_printf(s, "%d\n", boost_pool->camera_pid);
+	return 0;
+}
+
+static int camera_pid_proc_open(struct inode *inode, struct file *file)
+{
+	struct ion_boost_pool *data = PDE_DATA(inode);
+	return single_open(file, camera_pid_show, data);
+}
+
+static ssize_t camera_pid_proc_write(struct file *file, const char __user *buf,
+				size_t count, loff_t *ppos)
+{
+	char buffer[13];
+	int err, pid;
+	struct ion_boost_pool *boost_pool = PDE_DATA(file_inode(file));
+
+	if (boost_pool == NULL)
+		return -EFAULT;
+
+	memset(buffer, 0, sizeof(buffer));
+	if (count > sizeof(buffer) - 1)
+		count = sizeof(buffer) - 1;
+	if (copy_from_user(buffer, buf, count))
+		return -EFAULT;
+	err = kstrtoint(strstrip(buffer), 0, &pid);
+	if (err)
+		return err;
+
+	if (pid == 0) {
+		boost_pool->camera_pid = 0;
+		pr_info("reset camera_pid\n");
+		return count;
+	}
+
+	if (pid < 0) return -EINVAL;
+
+	boost_pool->camera_pid = pid;
+		pr_info("%s:%d set camera_pid\n",
+			current->comm, current->tgid);
+
+	return count;
+}
+
+static const struct file_operations camera_pid_proc_ops = {
+	.owner          = THIS_MODULE,
+	.open           = camera_pid_proc_open,
+	.read           = seq_read,
+	.write          = camera_pid_proc_write,
 	.llseek         = seq_lseek,
 	.release        = single_release,
 };
@@ -613,12 +796,20 @@ struct ion_boost_pool *boost_pool_create(struct ion_msm_system_heap *heap,
 			name);
 	}
 
+	snprintf(buf, 128, "%s_pid", name);
+	boost_pool->proc_pid = proc_create_data(buf, 0666, root_dir, &camera_pid_proc_ops,
+				    boost_pool);
+	if (IS_ERR_OR_NULL(boost_pool->proc_pid)) {
+		pr_err("create proc_fs pid failed\n");
+		goto destroy_proc_stat;
+	}
+
 	init_waitqueue_head(&boost_pool->waitq);
 	tsk = kthread_run(boost_pool_kworkthread, boost_pool,
 			  "bp_%s", name);
 	if (IS_ERR_OR_NULL(tsk)) {
 		pr_err("%s: kthread_create failed!\n", __func__);
-		goto destroy_proc_stat;
+		goto destroy_proc_pid;
 	}
 	boost_pool->tsk = tsk;
 
@@ -634,6 +825,8 @@ struct ion_boost_pool *boost_pool_create(struct ion_msm_system_heap *heap,
 
 	boost_pool_wakeup_process(boost_pool);
 	return boost_pool;
+destroy_proc_pid:
+	proc_remove(boost_pool->proc_pid);
 destroy_proc_stat:
 	proc_remove(boost_pool->proc_stat);
 destroy_proc_low_info:

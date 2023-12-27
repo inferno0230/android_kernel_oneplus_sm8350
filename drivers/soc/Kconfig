@@ -21,6 +21,7 @@ source "drivers/soc/ux500/Kconfig"
 source "drivers/soc/versatile/Kconfig"
 source "drivers/soc/xilinx/Kconfig"
 source "drivers/soc/zte/Kconfig"
+source "drivers/soc/oplus/storage/Kconfig"
 #ifdef OPLUS_FEATURE_POWERINFO_STANDBY
 source "drivers/soc/oplus/oplus_wakelock/Kconfig"
 #endif /* OPLUS_FEATURE_POWERINFO_STANDBY */
@@ -96,3 +97,7 @@ source "drivers/soc/oplus/game_opt/Kconfig"
 #endif /* OPLUS_FEATURE_GAME_OPT */
 
 source "drivers/soc/oplus/oplus_overload/Kconfig"
+
+#ifdef OPLUS_SUBSYS_SLEEP_MONITOR
+source "drivers/soc/oplus/power/subsys_sleep_monitor/Kconfig"
+#endif /* OPLUS_SUBSYS_SLEEP_MONITOR */
